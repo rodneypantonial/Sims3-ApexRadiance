@@ -1,5 +1,5 @@
-0017: asynchronous GetRenderTargetData for callers that can wait a frame or two. The client exports RemixBridge_ReadRenderTargetAsync, RemixBridge_PollReadback and RemixBridge_CancelReadback (client.asyncReadback, default off). The server queues the copy with an event query behind it and moves on; once the event signals (polled every 64 commands and at Present) it locks the destination without waiting and writes the rows into one of 4 shared 256 KB slots, then publishes the request's sequence (the QuerySharedBlock handshake). The game's own GetRenderTargetData calls stay synchronous. Test: test-async-readback.cmd (test_async_readback_device).
-Applies after 0001-0014 on NVIDIAGameWorks/dxvk-remix f35b86a (bridge/ only), with or without 0015-0016.
+0017: asynchronous GetRenderTargetData for callers that can wait a frame or two. The client exports RemixBridge_ReadRenderTargetAsync, RemixBridge_PollReadback and RemixBridge_CancelReadback (client.asyncReadback, default off). The server queues the copy with an event query behind it and moves on; once the event signals (polled every 64 commands and at Present) it locks the destination without waiting and writes the rows into one of 4 shared 256 KB slots, then publishes the request's sequence (the QuerySharedBlock handshake). Tickets come from a counter in the shared block, which a rewind test host does not put back, so a late answer never matches a new request. With rewind mode (0015) built in, the server keeps the destination's old contents for a held snapshot, as for the synchronous call. The game's own GetRenderTargetData calls stay synchronous. Test: test-async-readback.cmd (test_async_readback_device, on the system d3d9.dll and on the packaged DXVK); test_remix_api_bridge_app.py gains --serverD3d9.
+Applies after 0001-0014 on NVIDIAGameWorks/dxvk-remix f35b86a (bridge/ only), with or without 0015-0016. Without 0016 a device can lose its implicit objects to a hook that takes and returns a reference (Windows app compatibility does this on the first run of a new executable path), which crashes the first test run in a new folder.
 diff --git a/bridge/bridge.conf b/bridge/bridge.conf
 index 9a2220ad..1a9e074c 100644
 --- a/bridge/bridge.conf
@@ -20,10 +20,10 @@ index 9a2220ad..1a9e074c 100644
  #
 diff --git a/bridge/src/client/d3d9_async_readback.cpp b/bridge/src/client/d3d9_async_readback.cpp
 new file mode 100644
-index 00000000..9febb758
+index 00000000..1f89346e
 --- /dev/null
 +++ b/bridge/src/client/d3d9_async_readback.cpp
-@@ -0,0 +1,188 @@
+@@ -0,0 +1,189 @@
 +/*
 + * Permission is hereby granted, free of charge, to any person obtaining a
 + * copy of this software and associated documentation files (the "Software"),
@@ -79,7 +79,6 @@ index 00000000..9febb758
 +
 +  std::mutex s_mutex;
 +  Pending s_pending[ReadbackSharedBlock::kMaxSlots];
-+  uint32_t s_seq = 0;
 +
 +  bool asyncReadbackEnabled() {
 +    static const bool enabled = bridge_util::Config::getOption<bool>("client.asyncReadback", false);
@@ -163,20 +162,22 @@ index 00000000..9febb758
 +      return D3DERR_WASSTILLDRAWING;
 +    }
 +
-+    // Sequence numbers are never 0, because 0 marks a free slot.
-+    if (++s_seq == 0) {
-+      ++s_seq;
++    // Sequence numbers are never 0, because 0 marks a free slot. They come from the shared block (see lastSeq).
++    std::atomic<uint32_t>& lastSeq = bridge_util::readbackBlock()->lastSeq;
++    uint32_t seq = lastSeq.fetch_add(1) + 1;
++    if (seq == 0) {
++      seq = lastSeq.fetch_add(1) + 1;
 +    }
 +    pLssDest->AddRef();
-+    s_pending[slotIndex] = Pending { pLssDest, s_seq };
++    s_pending[slotIndex] = Pending { pLssDest, seq };
 +    {
 +      ClientMessage c(Commands::IDirect3DDevice9Ex_GetRenderTargetData, deviceId, Commands::FlagBits::AsyncResult);
 +      c.send_data(pLssSource->getId());
 +      c.send_data(pLssDest->getId());
 +      c.send_data(slotIndex);
-+      c.send_data(s_seq);
++      c.send_data(seq);
 +    }
-+    *pTicket = s_seq;
++    *pTicket = seq;
 +    return S_OK;
 +  }
 +
@@ -235,10 +236,10 @@ index a382d43c..aa2b49a5 100644
    'd3d9_cubetexture.cpp',
 diff --git a/bridge/src/server/async_readback.h b/bridge/src/server/async_readback.h
 new file mode 100644
-index 00000000..0501ac3e
+index 00000000..d0640d01
 --- /dev/null
 +++ b/bridge/src/server/async_readback.h
-@@ -0,0 +1,151 @@
+@@ -0,0 +1,161 @@
 +/*
 + * Permission is hereby granted, free of charge, to any person obtaining a
 + * copy of this software and associated documentation files (the "Software"),
@@ -267,6 +268,12 @@ index 00000000..0501ac3e
 +
 +#include "util_readbacks.h"
 +#include "util_texture_and_volume.h"
++
++// Rewind mode (patch 0015) is optional, so this patch builds with and without it.
++#if __has_include("rewind_mode.h")
++#include "rewind_mode.h"
++#define ASYNC_READBACK_HAS_REWIND 1
++#endif
 +
 +// Server side of the asynchronous GetRenderTargetData (client/d3d9_async_readback.cpp).
 +// The copy is queued on the device with an event query behind it, and the command loop moves on.
@@ -365,6 +372,10 @@ index 00000000..0501ac3e
 +      return;
 +    }
 +    Pending pending { nullptr, nullptr, S_OK, slot, seq };
++#ifdef ASYNC_READBACK_HAS_REWIND
++    // The copy writes dst as the synchronous GetRenderTargetData does, so a held snapshot keeps its old contents.
++    rewind_mode::keepSurface(pDst);
++#endif
 +    HRESULT hresult = pRenderTarget != nullptr && pDst != nullptr
 +      ? pDevice->GetRenderTargetData(pRenderTarget, pDst)
 +      : D3DERR_INVALIDCALL;
@@ -460,10 +471,10 @@ index 92e15498..273a1988 100644
  	'log/log_strings.h',
 diff --git a/bridge/src/util/util_readbacks.h b/bridge/src/util/util_readbacks.h
 new file mode 100644
-index 00000000..69576b80
+index 00000000..4f6ab841
 --- /dev/null
 +++ b/bridge/src/util/util_readbacks.h
-@@ -0,0 +1,50 @@
+@@ -0,0 +1,53 @@
 +#pragma once
 +
 +#include <atomic>
@@ -499,6 +510,9 @@ index 00000000..69576b80
 +    static constexpr uint32_t kMaxSlots = 4;  // 1 MB of the 32-bit client's address space, mapped on first use only
 +
 +    ReadbackSlot slots[kMaxSlots];
++    // The last ticket handed out. It lives here, not in the client: a rewind test host (patch 0015) puts the client's
++    // memory back but not this block, so a ticket is never handed out twice and a late answer cannot match a new request.
++    std::atomic<uint32_t> lastSeq;
 +  };
 +
 +  // Maps the block on first use; nullptr when the mapping failed (callers then use the synchronous path).
@@ -544,10 +558,10 @@ index 25ceb3b0..86927c39 100644
  
 diff --git a/bridge/test/rtx/unit/test_async_readback_device.cpp b/bridge/test/rtx/unit/test_async_readback_device.cpp
 new file mode 100644
-index 00000000..47f05666
+index 00000000..d4b6b3b7
 --- /dev/null
 +++ b/bridge/test/rtx/unit/test_async_readback_device.cpp
-@@ -0,0 +1,241 @@
+@@ -0,0 +1,256 @@
 +/*
 + * Permission is hereby granted, free of charge, to any person obtaining a
 + * copy of this software and associated documentation files (the "Software"),
@@ -718,8 +732,23 @@ index 00000000..47f05666
 +  }
 +}
 +
++// Names the faulting module and offset, so a crash in a run without a debugger can be traced.
++LONG WINAPI logCrash(EXCEPTION_POINTERS* pInfo) {
++  const auto address = reinterpret_cast<uintptr_t>(pInfo->ExceptionRecord->ExceptionAddress);
++  HMODULE hModule = nullptr;
++  char name[MAX_PATH] = "?";
++  if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
++                         reinterpret_cast<LPCSTR>(address), &hModule)) {
++    GetModuleFileNameA(hModule, name, MAX_PATH);
++  }
++  std::printf("CRASH: exception 0x%08lX at %s+0x%lX\n", static_cast<unsigned long>(pInfo->ExceptionRecord->ExceptionCode),
++              name, static_cast<unsigned long>(address - reinterpret_cast<uintptr_t>(hModule)));
++  return EXCEPTION_CONTINUE_SEARCH;
++}
++
 +int main() {
 +  std::setvbuf(stdout, nullptr, _IONBF, 0);
++  SetUnhandledExceptionFilter(logCrash);
 +  char mode[8] = {};
 +  GetEnvironmentVariableA("REMIX_ASYNC_READBACK_TEST_CASE", mode, sizeof(mode));
 +  const bool enabled = strcmp(mode, "off") != 0;
@@ -789,3 +818,26 @@ index 00000000..47f05666
 +  logLine(passed ? "PASSED" : "FAILED");
 +  return passed ? 0 : 1;
 +}
+diff --git a/bridge/test/rtx/unit/test_remix_api_bridge_app.py b/bridge/test/rtx/unit/test_remix_api_bridge_app.py
+index 628a4a99..c0fa9d9a 100644
+--- a/bridge/test/rtx/unit/test_remix_api_bridge_app.py
++++ b/bridge/test/rtx/unit/test_remix_api_bridge_app.py
+@@ -33,4 +33,6 @@ parser.add_argument("--bridgeDir", required=True,
+ parser.add_argument("--artifactDir", required=True)
+ parser.add_argument("--timeout", type=int, default=60, help="Seconds before a hung run is killed.")
++parser.add_argument("--serverD3d9", default=None,
++                    help="A stock DXVK x64 d3d9.dll for the server (server.useVanillaDxvk). The default is the system d3d9.dll.")
+ args = parser.parse_args()
+ 
+@@ -44,7 +46,11 @@ def deploy(run_dir, disable_timeouts, test_exe, client_dll, server_exe):
+     shutil.copy2(client_dll, run_dir)
+     shutil.copy2(server_exe, trex_dir)
++    if args.serverD3d9:
++        shutil.copy2(args.serverD3d9, os.path.join(trex_dir, "d3d9vk_x64.dll"))
+     with open(os.path.join(trex_dir, "bridge.conf"), "w") as conf:
+         conf.write("exposeRemixApi = True\n")
+         conf.write("disableTimeouts = {}\n".format(disable_timeouts))
++        if args.serverD3d9:
++            conf.write("server.useVanillaDxvk = True\n")
+ 
+ 

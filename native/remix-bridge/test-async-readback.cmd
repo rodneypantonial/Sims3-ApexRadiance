@@ -4,6 +4,7 @@ rem Run build.cmd first: the test uses its source tree in src\ and its bridge pa
 rem test_async_readback_device: a 32-bit D3D9 app through the built bridge pair reads ColorFill patterns (16x16 and
 rem 256x256) back through GetRenderTargetData and through RemixBridge_ReadRenderTargetAsync / RemixBridge_PollReadback
 rem and compares the bytes; it also fills all four slots, cancels one and checks the refusals. Mode off checks E_NOTIMPL.
+rem The server runs on the system's d3d9.dll and, when out\package\.trex\d3d9vk_x64.dll exists (package.ps1), on that DXVK as well.
 rem Needs what build.cmd needs, Python, and a desktop session with a GPU. Exit code 0: all passed.
 setlocal
 set HERE=%~dp0
@@ -26,5 +27,11 @@ for %%m in (on off) do (
   set REMIX_ASYNC_READBACK_TEST_CASE=%%m
   python "%UNIT%\test_remix_api_bridge_app.py" --testExe test_async_readback_device_x86.exe --executablesDir "%SRC%\bridge\_t_x86\test\rtx\unit" --bridgeDir "%SRC%\bridge\_output" --artifactDir "%SRC%\bridge\_t_x86\test_artifacts\async_readback_device_%%m" || (echo FAILED: test_async_readback_device, mode %%m & exit /b 1)
 )
+rem The server as players run it: stock DXVK x64 from package.ps1 instead of the system d3d9.dll.
+set DXVK=%HERE%out\package\.trex\d3d9vk_x64.dll
+if not exist "%DXVK%" (echo skipped: test_async_readback_device on DXVK, no out\package\.trex\d3d9vk_x64.dll & goto done)
+set REMIX_ASYNC_READBACK_TEST_CASE=on
+python "%UNIT%\test_remix_api_bridge_app.py" --testExe test_async_readback_device_x86.exe --executablesDir "%SRC%\bridge\_t_x86\test\rtx\unit" --bridgeDir "%SRC%\bridge\_output" --artifactDir "%SRC%\bridge\_t_x86\test_artifacts\async_readback_device_dxvk" --serverD3d9 "%DXVK%" || (echo FAILED: test_async_readback_device on DXVK & exit /b 1)
+:done
 echo async read-back tests passed
 exit /b 0
