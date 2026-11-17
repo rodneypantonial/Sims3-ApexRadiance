@@ -22,6 +22,7 @@
 #include "terrain_lighting_policy.h"
 #include "apex_memory.h"
 #include "captures.h"
+#include "build_flavor.h"
 #include "ui/i18n.h"
 #include "imgui.h"
 #include <windows.h>
@@ -208,6 +209,40 @@ std::string PixelLampDiag(const std::unordered_map<uintptr_t, size_t>& index) {
     return o;
 }
 
+// (developer build) The window lights' law (types 7 and 8, docs/engine/light-objects-and-rigs.md "Window lights"): its
+// eight tunables, and per window the channel 1 answer, the half-size and the area. Read-only, except that the channel test
+// is the game's own vfunc+0x1C (thiscall(light, 1) ret 4, 0x006C1DD0 on Steam), called under __try.
+using WindowChannelFn = bool(__fastcall*)(uintptr_t light, void* edx, int channel);
+int WindowChannel1(uintptr_t L) { // 1, 0, or -1 when the call faulted
+    __try {
+        return reinterpret_cast<WindowChannelFn>(Rd<uintptr_t>(Rd<uintptr_t>(L) + 0x1C))(L, nullptr, 1) ? 1 : 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return -1;
+    }
+}
+
+std::string WindowLightDiag() {
+    std::string o = "\n==== WINDOW LIGHTS (types 7, 8) ====\n";
+    if (GameAddr::IsFixed()) { // Steam 1.67.2 addresses (no signatures yet: other builds print nothing here)
+        static constexpr struct { const char* name; uintptr_t at; int n; } kTunables[] = {
+            {"g near fade", 0x011D0A80, 1}, {"sky scale", 0x011D0A88, 1}, {"R range", 0x011D0A90, 1}, {"sky away from sun", 0x011D0AA0, 1},
+            {"sky sun side", 0x011D0AA8, 1}, {"sun scale", 0x011D0AB0, 1}, {"C_ground", 0x011D0AC0, 4}, {"sky saturation", 0x011D0AE8, 1}};
+        for (const auto& t : kTunables) o += std::format("{} [{:#x}]={}\n", t.name, t.at, Floats(t.at, t.n));
+    } else
+        o += "(tunables: Steam 1.67.2 addresses only)\n";
+    const uintptr_t vt7 = GameAddr::Get(GameAddr::Id::LightVtable7), vt8 = GameAddr::Get(GameAddr::Id::LightVtable8);
+    int n = 0;
+    for (size_t i = 0; i < g_lights.size(); i++) {
+        const uintptr_t L = g_lights[i], vt = Rd<uint32_t>(L);
+        if (!vt || (vt != vt7 && vt != vt8)) continue;
+        n++;
+        o += std::format("#{} L{:08X} type={} channel1={} dimmer={:.4g} half[+0x210]={} area[+0x208]={:.4g} sun-gate[+0x220]={:.4g} sun-side[+0x200]={:08X} pos={}\n", i, L,
+                         vt == vt7 ? 7 : 8, WindowChannel1(L), Rd<float>(L + 0x10), Floats(L + 0x210, 3), Rd<float>(L + 0x208), Rd<float>(L + 0x220), Rd<uint32_t>(L + 0x200),
+                         Floats(L + 0x120, 3));
+    }
+    return o + std::format("({} window lights)\n", n);
+}
+
 void WriteDiag(const std::filesystem::path& into = {}) {
     const uintptr_t root = Rd<uintptr_t>(g_rootPtrAddr);
     const uintptr_t lightMgr = root ? Rd<uintptr_t>(root + 0x1C0) : 0;
@@ -307,6 +342,7 @@ void WriteDiag(const std::filesystem::path& into = {}) {
     }
     out << LevelLightShare::DiagText();
     out << PixelLampDiag(index);
+    if constexpr (kDevToolsBuild) out << WindowLightDiag();
     out << LotLightBridge::IndoorWhyText();
     out << DaylightProbe::SnapshotText(lightMgr, g_lights); // development builds with daylight_log only
     out << memory;                                             // development builds with memory_owners only (taken above)

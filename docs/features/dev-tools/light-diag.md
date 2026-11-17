@@ -77,7 +77,10 @@ why an enclosed plaza is dark (a room with 0 lights), and the cone of a spotligh
    `No world loaded` and shows the warning notice "Lighting snapshot: load a world first". Otherwise it creates
    `Captures\<date time> Lighting snapshot\` (`Captures::NewFolder`), enumerates lights (up to 200,000) inside `__try`
    with a visitor whose vtable[0] is `VisitLight` (`__fastcall` standing in for `thiscall(visitor, Light*) ret 4`),
-   walks the lot tree, appends `LevelLightShare::DiagText()` and `PixelLampDiag`, writes `Lighting snapshot.txt`, logs
+   walks the lot tree, appends `LevelLightShare::DiagText()`, `PixelLampDiag` and, in the developer build,
+   `WindowLightDiag` (the window light law's eight tunables on Steam 1.67.2, and per type 7 or 8 light its channel 1
+   answer from the game's vfunc `+0x1C` under `__try`, dimmer, half-size `+0x210`, area `+0x208`, sun gate `+0x220` and
+   sun side `+0x200`; [light-objects-and-rigs.md](../../engine/light-objects-and-rigs.md)), writes `Lighting snapshot.txt`, logs
    `[LightDiag] Saved: N lights, M lot stories, R rooms`, and calls `Captures::Finish` (log, settings, crash file,
    `About this capture.txt`, notice "Lighting snapshot saved. Open Report a problem to find your files").
 
