@@ -32,25 +32,25 @@ Apex Radiance's test harness or to diagnostics.
 |---|---|---|---|---|
 | 0001 | `GetRenderTarget` and `GetDepthStencilSurface` return `D3DERR_NOTFOUND` on an empty slot instead of `S_OK` with NULL | upstream | not fixed | `fix/get-render-target-notfound` |
 | 0002 | `BridgePerf` counters of client copies of locked surfaces and buffers | apex-only (diagnostics) | not present | none |
-| 0003 | `client.freeIdleManagedCopiesSec`: free a MANAGED texture level's client copy after N s without a lock, fetch it back on the next lock | upstream later | not present | none |
+| 0003 | `client.freeIdleManagedCopiesSec`: free a MANAGED texture level's client copy after N s without a lock, fetch it back on the next lock | upstream (with 0008, 0009, 0013) | not present | `fix/free-idle-client-copies` |
 | 0004 | `[BridgeDiag]` memory, frame outlier, upload repeat and creation site lines | apex-only (diagnostics) | not present | none |
 | 0005 | client logger: a line of 4 KB or more no longer ends the process with 0xC0000409 | upstream | not fixed | `fix/logger-long-lines` |
 | 0006 | `client.ts3TextureCacheShift`: patches the game's ResourceCache texture size in memory | apex-only (The Sims 3) | not present | none |
 | 0007 | `client.ts3TextureKeepAliveSec`: hooks the game's ResourceCache trim | apex-only (The Sims 3) | not present | none |
-| 0008 | `client.freeIdleBufferCopiesSec`: free a static vertex or index buffer's client copy after N s without a lock | upstream later | not present | none |
-| 0009 | `client.freeIdleManagedCopiesMs`: 0003's threshold in milliseconds | upstream later (with 0003) | not present | none |
+| 0008 | `client.freeIdleBufferCopiesSec`: free a static vertex or index buffer's client copy after N s without a lock | upstream (with 0003) | not present | `fix/free-idle-client-copies` |
+| 0009 | `client.freeIdleManagedCopiesMs`: 0003's threshold in milliseconds | upstream (with 0003) | not present | `fix/free-idle-client-copies` |
 | 0010 | render target 0 is the implicit swapchain's back buffer 0 object, as in d3d9 | upstream (with 0016) | not fixed (`LinkBackBuffer` place-holder) | `fix/render-target-0-is-back-buffer-0` |
 | 0011 | `SetRenderTarget(0)`, `Reset` and `ResetEx` reset the client's viewport and scissor rect | upstream | not fixed (sent-state invalidation only) | `fix/render-target-0-resets-viewport` |
 | 0012 | `SetFVF` and `SetVertexDeclaration` replace each other in the client's state | upstream | not fixed | `fix/setfvf-declaration-replace` |
-| 0013 | idle copy fetch fixes for 0003 and 0008 | upstream later (with 0003, 0008) | not present | none |
+| 0013 | idle copy fetch fixes for 0003 and 0008 | upstream (with 0003) | not present | `fix/free-idle-client-copies` |
 | 0014 | a new surface shadow copy starts zeroed | upstream | not fixed | `fix/surface-copy-zeroed` |
 | 0015 | `rewindMode`: snapshot and rewind of the server's D3D9 state for test harnesses | apex-only (test harness) | not present | none |
 | 0016 | render target 0 is not counted as a device reference (fixes 0010's reference count) | upstream (folded into 0010) | needs 0010 | `fix/render-target-0-is-back-buffer-0` |
 | 0017 | asynchronous `GetRenderTargetData` exports (`RemixBridge_ReadRenderTargetAsync`) | apex-only for now (new exported API) | not present | none |
 
 0003, 0008, 0009 and 0013 together save 32-bit client address space for any game that keeps many MANAGED textures
-or static buffers. Before they are offered upstream they need one squashed change on current `main`, the options
-documented in `bridge/bridge.conf`, and the 64 KB VirtualAlloc rule from 0013 merged into 0003 and 0008.
+or static buffers. They are offered as one change, `fix/free-idle-client-copies`, without the Apex-only `BridgePerf`
+counters of the patches.
 
 ## Branches
 
@@ -58,7 +58,8 @@ Each branch is one commit on upstream `main` (`afb0252`), pushed to a contributo
 commits carry no credit line yet: the first pull request adds the author to `dxvk_imgui_about.cpp`, the others leave
 it out to avoid conflicts. Build: the six branches merged together build the release x64 server and x86 client with
 VS 2022 and meson 1.12, and each branch alone builds the x86 client. No game test has run on these branches; the
-same changes ship in the Apex Radiance bridge package on the pinned commit.
+same changes ship in the Apex Radiance bridge package on the pinned commit. `fix/free-idle-client-copies` alone builds the
+release x64 server and x86 client.
 
 ### fix/get-render-target-notfound
 
@@ -203,3 +204,51 @@ and some lots drew their ground black on some loads.
 - Built the bridge (x64 server, x86 client, release).
 - The affected lots draw their ground correctly on every load.
 ```
+
+### fix/free-idle-client-copies
+
+Title: `bridge: free idle client copies of MANAGED textures and static buffers`
+
+```text
+## Summary
+The bridge client keeps a copy of every locked MANAGED texture level and of
+every vertex and index buffer in the game process for the object's whole
+life. A 32-bit game that fills its textures and static geometry once carries
+that data twice, once on the server and once in its own address space.
+
+Two client options, both off by default, free such a copy after it has not
+been locked for a while:
+- client.freeIdleManagedCopiesSec (or client.freeIdleManagedCopiesMs) for
+  MANAGED texture levels.
+- client.freeIdleBufferCopiesSec for static vertex and index buffers of
+  64 KB to 4 MB.
+
+Freeable copies of 64 KB and more come from VirtualAlloc, so freeing one
+returns its address space. Idle copies are freed during Present. The next
+lock fetches the copy back from the server: a texture level through the
+existing IDirect3DSurface9_LockRect readback, a buffer through a Lock with
+the new ReturnData flag. If the fetch fails, the lock fails, so that Unlock
+cannot upload stale bytes over the server's copy. A CRC32C of the freed copy
+is compared with the fetched one and a mismatch is logged once. With the
+options off, nothing changes. With an option on, the client needs a server of
+the same version. The options are documented in bridge/bridge.conf.
+
+## Testing
+- Built the bridge (x64 server, x86 client, release).
+- A small D3D9 test app under the bridge (x64 server on vanilla DXVK) fills
+  96 MANAGED 512x512 A8R8G8B8 textures and 64 static 1 MiB vertex buffers
+  once, presents for 6 s, then relocks each one read-only and checks every
+  byte:
+
+  | Client process        | Options off | Options on (2 s) |
+  |-----------------------|-------------|------------------|
+  | Private bytes         | 164.9 MiB    | 3.9 MiB           |
+  | Address space in use  | 396.7 MiB    | 229.2 MiB         |
+
+  All 160 relocked objects hold the bytes written before the copies were
+  freed, and no CRC mismatch is logged.
+- The same change has shipped in the Apex Radiance bridge package.
+```
+
+Measurement: 2026-11-17, release builds of the branch, values read with `GetProcessMemoryInfo` and a `VirtualQuery`
+walk after the idle presents. After the relock the fetched copies are back (164.2 MiB private), as expected.
