@@ -233,6 +233,7 @@ namespace ApexTestAgent
             Dispatcher.Register("game_state", GameState);
             Dispatcher.Register("load_save", LoadSave);
             Dispatcher.Register("set_speed", SetSpeed);
+            Dispatcher.Register("time_set", TimeSet);
             Dispatcher.Register("camera", CameraView);
             Dispatcher.Register("camera_pan", CameraPan);
             Dispatcher.Register("camera_orbit", CameraOrbit);
@@ -345,6 +346,16 @@ namespace ApexTestAgent
             }
             if (GF.GameSpeedLocked && target != GameSpeed.Pause) throw new AgentException("game speed is locked (a dialog is open or the game is saving)");
             if (GF.CurrentGameSpeed != target) GF.SetGameSpeed(target, GF.SetGameSpeedContext.User); // Pause toggles when already paused
+            return GameState(a);
+        }
+
+        // time_set {hour}: moves the game clock forward, a whole hour at a time through the game's own SimClock.AddOneHour
+        // (the debug "add one hour"), until it reads `hour` (0..23), so a day save can be run at night. Returns the state.
+        static object TimeSet(Args a)
+        {
+            int hour = (int)a.Double("hour", -1);
+            if (hour < 0 || hour > 23) throw new AgentException("hour 0..23 needed");
+            for (int i = 0; i < 24 && SimClock.Hours24 != hour; i++) SimClock.AddOneHour();
             return GameState(a);
         }
 

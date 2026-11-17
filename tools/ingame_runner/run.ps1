@@ -560,6 +560,7 @@ function Invoke-Load($Load, [string]$BaseToml) {
                     $o = Call-Agent 'camera_orbit' $a
                     Say "  step ${n}: camera orbit around $($o.name) at $($o.lot.x), $($o.lot.z)$(if ($o.door) { " ($($o.door))" })"
                 }
+                'time' { $o = Call-Agent 'time_set' @{ hour = $step.hour }; Say "  step ${n}: clock $($o.clock)" }
                 'camera' { Call-Agent 'camera' @{ pos = $step.pos; target = $step.target } | Out-Null }
                 'camera_pan' {
                     $a = @{}; foreach ($p in $step.PSObject.Properties) { if ($p.Name -ne 'do') { $a[$p.Name] = $p.Value } }

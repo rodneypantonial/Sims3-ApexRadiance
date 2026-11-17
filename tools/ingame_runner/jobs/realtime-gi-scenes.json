@@ -1,0 +1,66 @@
+{
+  "id": "realtime-gi-scenes",
+  "description": "Recorded lighting scenes for the real-time GI offline checks. The household's lot at night: ApexTest-Town (a Sunset Valley household) with its clock moved to 22:00 (time step; ApexTest-Night works as well and keeps 22:00 or moves to the next 22:00): a lighting snapshot (with the window lights' law values in the developer build), three recordings of the lot's room solves (Captures\\<date> Recording\\Lighting scene.apexscene for tools/scene_replay and tools/rt_lamps_test) from three camera places, one filtered screenshot and one frame capture of the night frame (ApexRadiance_FrameCapture.txt beside the log: the impostor draws and the wall draws). Developer mode on, bare F-key shortcuts for the run (the runner cannot hold a modifier). Pass: three recordings each save at least one room solve, the snapshot and the frame capture are written, a PNG is in captures\\.",
+  "save": "ApexTest-Town",
+  "toml": {
+    "ui": {
+      "developer_mode": true,
+      "recorder_key": "F6",
+      "diagnostics_key": "F7",
+      "screenshot_key": "F8",
+      "frame_capture_key": "F12",
+      "screenshot_folder": "custom",
+      "screenshot_custom_folder": "%APEX_RUNNER_CAPTURES%"
+    },
+    "screen": { "background_fps_limit": 0 },
+    "capture.screenshot": { "file_type": "png", "burst_count": 1 },
+    "patches.FrameCapture": { "enabled": true },
+    "patches.NightTerrainRelight": { "gpuRoomLamps": true, "roomLampModel": "physical" }
+  },
+  "order": ["on"],
+  "variants": {
+    "on": {
+      "expect": [
+        "\\[LightDiag\\] Saved: [1-9]",
+        "\\[SceneRecord\\] Recording the physical rooms' solves",
+        "\\[SceneRecord\\] Saved [1-9][0-9]* room solves to Lighting scene\\.apexscene",
+        "\\[Recorder\\] Saved [0-9]+ lines to Captures",
+        "\\[FrameCapture\\] Capture saved \\([1-9]",
+        "\\[Captures\\] Filtered screenshot requested"
+      ]
+    }
+  },
+  "fail": [
+    "\\[SceneRecord\\] Recording, but the physical indoor lamp model is off",
+    "\\[Recorder\\] Cancelled",
+    "\\[FrameCapture\\] (Could not open output file|No Present seen while armed)",
+    "\\[Captures\\] (The chosen .* folder is not available|The screenshot could not be written|No screenshot)"
+  ],
+  "steps": [
+    { "do": "speed", "speed": "pause" },
+    { "do": "time", "hour": 22 },
+    { "do": "speed", "speed": "normal" },
+    { "do": "wait", "minutes": 0.5 },
+    { "do": "speed", "speed": "pause" },
+    { "do": "camera_orbit", "radius": 18, "height": 12, "seconds": 30, "turns": 0.1 },
+    { "do": "wait", "minutes": 1.5 },
+    { "do": "key", "vk": 118 },
+    { "do": "wait", "minutes": 0.2 },
+    { "do": "key", "vk": 117 },
+    { "do": "wait", "minutes": 1.3 },
+    { "do": "key", "vk": 119 },
+    { "do": "wait", "minutes": 0.2 },
+    { "do": "key", "vk": 123 },
+    { "do": "wait", "minutes": 0.3 },
+    { "do": "speed", "speed": "normal" },
+    { "do": "camera_orbit", "radius": 14, "height": 6, "seconds": 30, "turns": 0.1 },
+    { "do": "wait", "minutes": 0.3 },
+    { "do": "key", "vk": 117 },
+    { "do": "wait", "minutes": 1.3 },
+    { "do": "camera_orbit", "radius": 24, "height": 16, "seconds": 30, "turns": 0.1 },
+    { "do": "wait", "minutes": 0.3 },
+    { "do": "key", "vk": 117 },
+    { "do": "wait", "minutes": 1.3 },
+    { "do": "check_files", "pattern": "*.png", "min": 1 }
+  ]
+}

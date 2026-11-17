@@ -233,6 +233,7 @@ A job is a JSON file in `jobs/`, its `id` equal to the file name:
 | `speed` | `speed`: `pause`, `normal`, `fast`, `ultra` | Sets the game speed; a wait sets it again when a dialog paused the game |
 | `wait` | `minutes`, `measure`, `until` | Lets the game run; answers dialogs every 30 s. `measure` records frame times with `-Profiler` (the first measured wait counts). `until` (`{ "jumps": 75 }`; also `loops`, `outfitChanges`, `spawned` of `camera_jumps`, `rounds`, `started` of `vfx_burst`) ends a measured wait once the running repro reaches that count, checked every 30 s; `minutes` is then the cap |
 | `camera` | `pos`, `target` (`{x, y, z}`) | Places the game camera |
+| `time` | `hour` (0..23) | Moves the game clock forward a whole hour at a time (the game's own add-one-hour) until it reads `hour`: a day save run at night |
 | `camera_pan` | `lots` (8), `height` (25 m), `seconds` (40), `dwellS` (0), `passes` (4) | Pans the camera over the densest neighbourhood's lots, there and back, in the background; follow it with a `wait` |
 | `save` | | Saves as a new `ApexRunner-<run id>-<load>-<n>` save and waits until it is written (a save of that name that already exists fails the step). The runner deletes these saves after the load unless `-KeepSaves` |
 | `reload` | `save` (`last` or a save name) | Loads a save from inside the world and waits for live mode |
