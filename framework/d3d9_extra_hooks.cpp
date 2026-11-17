@@ -50,6 +50,7 @@ ColorFill_t oColorFill = nullptr;
 GetRenderTarget_t oGetRenderTarget = nullptr;
 std::atomic<SurfaceAccess> g_access{nullptr};
 std::atomic<TargetReport> g_targetReport{nullptr};
+std::atomic<ReadbackFilter> g_readbackFilter{nullptr};
 std::atomic<bool> g_targetInstalled{false};
 std::atomic<bool> g_targetAttempted{false};
 #ifndef APEX_NO_DEV_TOOLS
@@ -109,6 +110,11 @@ inline void BeforeAccess(IDirect3DDevice9* dev, IDirect3DSurface9* a, IDirect3DS
 
 HRESULT __stdcall HookedGetRenderTargetData(IDirect3DDevice9* dev, IDirect3DSurface9* src, IDirect3DSurface9* dst) {
     BeforeAccess(dev, src, dst);
+    if (auto filter = g_readbackFilter.load()) {
+        bool done = false;
+        HookGuard::Try("Read-back filter", [&] { done = filter(dev, src, dst); });
+        if (done) return D3D_OK;
+    }
 #ifndef APEX_NO_DEV_TOOLS
     // The call alone: DXVK only marks the read-back (the GPU wait lands at the game's later LockRect); the RTX Remix
     // bridge blocks here; native drivers unverified.
@@ -330,6 +336,7 @@ bool EnsureTargetHooks(IDirect3DDevice9* dev) {
     return true;
 }
 
+void SetReadbackFilter(ReadbackFilter fn) { g_readbackFilter.store(fn); }
 void SetTargetSubstitution(SurfaceAccess access, TargetReport report) {
     g_access.store(access);
     g_targetReport.store(report);

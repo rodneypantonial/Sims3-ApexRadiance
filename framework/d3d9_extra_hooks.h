@@ -47,6 +47,10 @@ using TargetReport = IDirect3DSurface9* (*)(IDirect3DSurface9* actual);
 bool EnsureTargetHooks(IDirect3DDevice9* device);
 void SetTargetSubstitution(SurfaceAccess access, TargetReport report);
 HRESULT RawGetRenderTarget(IDirect3DDevice9* device, DWORD index, IDirect3DSurface9** surface);
+// Read-back filter (single owner, the mouse pick, pick_readback.cpp), called in the GetRenderTargetData detour (installed
+// by EnsureTargetHooks): true when dst already holds src's pixels, and the call then returns D3D_OK without the copy.
+using ReadbackFilter = bool (*)(IDirect3DDevice9* device, IDirect3DSurface9* src, IDirect3DSurface9* dst);
+void SetReadbackFilter(ReadbackFilter fn);
 
 #ifndef APEX_NO_DEV_TOOLS
 // Development builds (the Frame Profiler's per-frame timeline): while counting is on, the GetRenderTargetData detour adds
