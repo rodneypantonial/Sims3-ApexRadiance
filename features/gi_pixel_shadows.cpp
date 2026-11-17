@@ -15,6 +15,7 @@
 #include "gbuffer_motion.h"
 #include "gi_pixel_filter_hlsl.h"
 #include "gi_sim_capsules.h"
+#include "gi_sim_rig_hook.h"
 #include "penumbra.h"
 #include "mesh_caster_set.h"
 #include "d3d9_hooks.h"
@@ -126,6 +127,8 @@ struct State {
     std::vector<GiSimCapsules::Sim> prevSims;
     uint32_t sims = 0, simsFit = 0;
     unsigned long long simDrawsSeen = 0, simDrawsNoChain = 0, simDrawsOtherCamera = 0, simDrawsFit = 0;
+    unsigned long long simDrawsRig = 0; // draws paired with a skin rig (XR-10 part 4)
+    bool rigHook = false;
 } g;
 
 constexpr const char* kHookName = "GiPixelShadows";
@@ -186,6 +189,10 @@ void NoteSimDraw(D3D9Hooks::DeviceContext& ctx) {
     const int bones = std::min(g.paletteRegs, 180) / 3;
     GiSimCapsules::BoneMedian(g.vsc, bones, d.median);
     if (const GiSimCapsules::Rig* rig = GiSimCapsules::RigOf(GiSimCapsules::GameRigs(), bones)) d.fit = GiSimCapsules::FitRig(g.vsc, bones, *rig, d.caps);
+    else if (GiSimCapsules::SkinRig sr; g.rigHook && 3 * bones == g.paletteRegs && GiSimRigHook::Find(g.paletteRegs, &g.vsc[0][0], sr)) {
+        g.simDrawsRig++;
+        d.fit = GiSimCapsules::FitJoints(g.vsc, bones, sr.joint, sr.nj, sr.cap, sr.nc, d.caps);
+    }
     g.simDrawsFit += d.fit > 0;
     g.simDraws.push_back(d);
 }
@@ -263,7 +270,7 @@ bool Opened() {
     if (state != 1) return GoOff(StateName(state)), false;
     if (!g.loggedOn) {
         g.loggedOn = true;
-        LOG_INFO(std::format("[GiPixel] On: view={} testCaster={} meshCasters={}", g.o.view, g.o.testCaster ? 1 : 0, g.o.meshCasters ? 1 : 0));
+        LOG_INFO(std::format("[GiPixel] On: view={} testCaster={} meshCasters={} simRigs={}", g.o.view, g.o.testCaster ? 1 : 0, g.o.meshCasters ? 1 : 0, g.rigHook ? 1 : 0));
         MeshCasterSet::pixelCasts.store(g.o.meshCasters); // (XR-10) objects the server casts leave the Direct3D 9 tests
     }
     return true;
@@ -401,7 +408,12 @@ void LogCounters() {
     if (g.counters(w, 9) != S_OK) return;
     const std::string line = std::format("[GiPixel] passes={} rays={} raysLast={} gpuUs={} size={}x{} faults={} sent={} refused={} sims={} simDraws={} "
                                          "noChain={} otherCamera={} simsFit={} simDrawsFit={}", w[1], (static_cast<uint64_t>(w[4]) << 32) | w[3], w[5], w[6], w[7], w[8], w[2], g.sent,
-                                         g.refused, g.sims, g.simDrawsSeen, g.simDrawsNoChain, g.simDrawsOtherCamera, g.simsFit, g.simDrawsFit);
+                                         g.refused, g.sims, g.simDrawsSeen, g.simDrawsNoChain, g.simDrawsOtherCamera, g.simsFit, g.simDrawsFit) +
+                             (g.rigHook ? [] {
+                                 const GiSimRigHook::Counters c = GiSimRigHook::Read();
+                                 return std::format(" rigFills={} rigs={} rigFaults={} simDrawsRig={}", c.fills, c.rigs, c.faults, g.simDrawsRig);
+                             }()
+                                        : std::string());
     if (w[2] || g.refused) LOG_WARNING(line);
     else LOG_INFO(line);
 }
@@ -519,11 +531,17 @@ void Start(const Options& o) {
     RenderCallbacks::Add(RenderCallbacks::restartEffects, RestartEffects);
     PostScene::Add(kOrder, Effect);
     InstallSimHooks();
+    if (o.simRigs) {
+        std::string why;
+        g.rigHook = GiSimRigHook::Start(&why);
+        if (!g.rigHook) LOG_WARNING("[GiPixel] Sim rigs off: " + why + "; the Sims keep the fixed column");
+    }
 }
 
 void Stop() {
     if (!g.active) return;
     MeshCasterSet::pixelCasts.store(false);
+    if (g.rigHook) GiSimRigHook::Stop(), g.rigHook = false;
     PostScene::Remove(Effect);
     D3D9Hooks::UnregisterAll(kHookName);
     ReleaseSimShaders();

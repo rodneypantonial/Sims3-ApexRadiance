@@ -1,6 +1,6 @@
 {
   "id": "gi-pixel-smoke",
-  "description": "Per-pixel delta shadows smoke (XR-07, XR-08; developer build: -Asi Release\\ApexRadiance.asi). Needs the bridge pair of patches 0019-0020 (0022 for variant meshes) and the x64 d3d9.dll of native/dxvk in Bin. Real-Time Lighting on with pixelShadows and the filtered mask view through a 60 s pan. Variant sims: no test capsule, the Sims' own capsules (casters from the Sim draws): the counters line shows sims above 0 and rays above 0. Variant meshes (XR-10): with meshCasters, the server's meshes cast in the pass and the objects it resolved leave the Direct3D 9 lamps' 3D test (darkened once): the On line says meshCasters=1 and the mesh line shows read-backs and meshed records above 0. Variant on (the default): the test capsule. Pass: no crash, the On line, a counters line with passes and rays above 0 and faults=0, no off or error line.",
+  "description": "Per-pixel delta shadows smoke (XR-07, XR-08; developer build: -Asi Release\\ApexRadiance.asi). Needs the bridge pair of patches 0019-0020 (0022 for variant meshes) and the x64 d3d9.dll of native/dxvk in Bin. Real-Time Lighting on with pixelShadows and the filtered mask view through a 60 s pan. Variant sims: no test capsule, the Sims' own capsules (casters from the Sim draws): the counters line shows sims above 0 and rays above 0. Variant meshes (XR-10): with meshCasters, the server's meshes cast in the pass and the objects it resolved leave the Direct3D 9 lamps' 3D test (darkened once): the On line says meshCasters=1 and the mesh line shows read-backs and meshed records above 0. Variant rigs (XR-10 part 4): with pixelSimRigs, each Sim draw's capsules come from its own skin: the On line says simRigs=1, a first-rig line gives the pelvis's bind place (about 1 m from the model origin for an adult if the bind poses are inverse binds), the counters line shows rigs, paired draws and fitted draws above 0 with rigFaults=0. Variant on (the default): the test capsule. Pass: no crash, the On line, a counters line with passes and rays above 0 and faults=0, no off or error line.",
   "save": "ApexTest-Night",
   "toml": {
     "ui": {
@@ -22,6 +22,19 @@
       "expect": [
         "\\[GiPixel\\] On: view=1 testCaster=0",
         "\\[GiPixel\\] passes=[1-9]\\d* rays=[1-9]\\d* .* faults=0 .*sims=[1-9]"
+      ]
+    },
+    "rigs": {
+      "toml": {
+        "patches.RealtimeGI": {
+          "pixelTestCaster": false,
+          "pixelSimRigs": true
+        }
+      },
+      "expect": [
+        "\\[GiPixel\\] On: view=1 testCaster=0 meshCasters=0 simRigs=1",
+        "\\[GiSimRigs\\] First rig: \\d+ slots",
+        "\\[GiPixel\\] passes=[1-9]\\d* .* simDrawsFit=[1-9]\\d* rigFills=[1-9]\\d* rigs=[1-9]\\d* rigFaults=0 simDrawsRig=[1-9]"
       ]
     },
     "meshes": {
@@ -53,7 +66,9 @@
   "fail": [
     "\\[GiPixel\\] off",
     "\\[GiPixel\\] .*faults=[1-9]",
-    "\\[GiPixel\\] Could not create"
+    "\\[GiPixel\\] Could not create",
+    "\\[GiPixel\\] Sim rigs off",
+    "\\[GiPixel\\] .*rigFaults=[1-9]"
   ],
   "steps": [
     {

@@ -1057,7 +1057,7 @@ bool Start(const Options& o, std::string* error) {
     }
     RenderCallbacks::preReset.Add(OnPreReset);
     g_running = true;
-    if (o.pixelShadows) GiPixelShadows::Start({o.pixelView, o.pixelTestCaster, o.meshCasters});
+    if (o.pixelShadows) GiPixelShadows::Start({o.pixelView, o.pixelTestCaster, o.meshCasters, o.pixelSimRigs});
     g_lampIndexMode = kDevToolsBuild ? std::clamp(o.lampIndex, 0, 2) : 0;
     if (g_lampIndexMode.load()) LOG_INFO(std::format("[RealtimeGI] Lamp index: mode={}", kLampIndexNames[g_lampIndexMode.load()]));
     // read back by the test harness (design.md section 6): logged by UpdateLamps in a world, with lots = the GI lots then
@@ -1109,6 +1109,9 @@ class RealtimeGiPatch : public ApexPatch {
         if constexpr (kDevToolsBuild)
             RegisterIntSetting(&lampIndex_, "lampIndex", 0, 0, 2, "Lamp index cells: 0 off, 1 compare each per-draw pick with its cell, 2 draw from the cells");
         RegisterBoolSetting(&meshTiles_, "meshTiles", false, "Developer mode: draw every object's own mesh into the lamps' shadow tiles (needs the bridge)");
+        // (XR-10 part 4) developer builds only: hooks the game's skin fill
+        if constexpr (kDevToolsBuild)
+            RegisterBoolSetting(&pixelSimRigs_, "pixelSimRigs", false, "Developer: Sim shadow capsules from each Sim draw's own bones (with pixelShadows)");
     }
 
     bool Install() override {
@@ -1117,7 +1120,7 @@ class RealtimeGiPatch : public ApexPatch {
         std::string error;
         const RealtimeGI::Options o{lots_, solveCap_, 1 << scale_, indirect_, static_cast<RealtimeGI::Backend>(backend_), debugLampTable_,
                                     pixelShadows_, pixelView_, pixelTestCaster_, (meshCasters_ || meshTiles_) && !kPublicBuild, debugFakeSolve_, lampIndex_,
-                                    meshTiles_ && !kPublicBuild};
+                                    meshTiles_ && !kPublicBuild, kDevToolsBuild && pixelSimRigs_ && !kPublicBuild};
         if (!RealtimeGI::Start(o, &error)) return Fail(error);
         isEnabled = true;
         return true;
@@ -1134,6 +1137,7 @@ class RealtimeGiPatch : public ApexPatch {
   private:
     int backend_ = 0, lots_ = 0, solveCap_ = 0, scale_ = 0, indirect_ = 0, lampIndex_ = 0;
     bool debugLampTable_ = false, pixelShadows_ = false, pixelTestCaster_ = false, meshCasters_ = false, debugFakeSolve_ = false, meshTiles_ = false;
+    bool pixelSimRigs_ = false;
     int pixelView_ = 0;
 };
 

@@ -15,6 +15,7 @@
 // Header only, no Direct3D: tools/gi_server_test/pixel_check.cpp checks it on a synthetic draw and over the game's
 // Shaders_Win32.precomp (--precomp).
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -229,6 +230,7 @@ struct RigJoint {
 struct RigCapsule {
     int a, b; // joints (a == b: a ball)
     float r;
+    int part = 0; // body part (SkinPart) of a rig made from a skin; 0: none (Merge then takes one draw's fit whole)
 };
 struct Rig {
     const char* name;
@@ -240,7 +242,7 @@ struct Rig {
 // The rigs known by palette size. Empty in game: the palette is in each drawn mesh's own joint order, with only the joints
 // that mesh uses (the skin fill 0x0068F3F0, Steam 1.67.2; wp/XR-10.md), so a palette's size names no rig and every Sim
 // keeps the fixed column. The source that fits in game is a rig made per draw from the skin's joint name hashes and bind
-// poses (drawable +0x64 skin: +0x2C hashes, +0x30 bind poses), read by a hook on that fill: a follow-up package
+// poses (drawable +0x64 skin: +0x2C hashes, +0x30 bind poses), read by a hook on that fill: SkinRig below, gi_sim_rig_hook.h
 inline const std::vector<Rig>& GameRigs() {
     static const std::vector<Rig> rigs;
     return rigs;
@@ -260,15 +262,16 @@ inline const Rig* RigOf(const std::vector<Rig>& rigs, int bones) {
 // A capsule in model or world space
 struct Capsule {
     float a[3], b[3], r;
+    int part = 0; // its RigCapsule's part
 };
 
 // The rig's capsules this frame in model space from the palette rows. Returns how many (0: no fit: a bone past the
 // palette, a capsule's length off by more than kLengthTolerance, or more than kMaxPerSim capsules)
-inline int FitRig(Rows reg, int bones, const Rig& rig, Capsule out[kMaxPerSim]) {
-    if (rig.capsules.size() > static_cast<size_t>(kMaxPerSim) || rig.joints.size() > 64 || bones != rig.bones) return 0;
+inline int FitJoints(Rows reg, int bones, const RigJoint* joints, size_t nj, const RigCapsule* caps, size_t nc, Capsule out[kMaxPerSim]) {
+    if (nc > static_cast<size_t>(kMaxPerSim) || nj > 64) return 0;
     float at[64][3];
-    for (size_t j = 0; j < rig.joints.size(); j++) {
-        const RigJoint& J = rig.joints[j];
+    for (size_t j = 0; j < nj; j++) {
+        const RigJoint& J = joints[j];
         if (J.bone < 0 || J.bone >= bones || J.bone >= 60) return 0;
         for (int k = 0; k < 3; k++) {
             const float* row = reg[3 * J.bone + k];
@@ -280,16 +283,135 @@ inline int FitRig(Rows reg, int bones, const Rig& rig, Capsule out[kMaxPerSim]) 
         return std::sqrt((p[0] - q[0]) * (p[0] - q[0]) + (p[1] - q[1]) * (p[1] - q[1]) + (p[2] - q[2]) * (p[2] - q[2]));
     };
     int n = 0;
-    for (const RigCapsule& c : rig.capsules) {
-        if (c.a < 0 || c.b < 0 || static_cast<size_t>(c.a) >= rig.joints.size() || static_cast<size_t>(c.b) >= rig.joints.size()) return 0;
-        const float bind = dist(rig.joints[c.a].bind, rig.joints[c.b].bind), now = dist(at[c.a], at[c.b]);
+    for (size_t i = 0; i < nc; i++) {
+        const RigCapsule& c = caps[i];
+        if (c.a < 0 || c.b < 0 || static_cast<size_t>(c.a) >= nj || static_cast<size_t>(c.b) >= nj) return 0;
+        const float bind = dist(joints[c.a].bind, joints[c.b].bind), now = dist(at[c.a], at[c.b]);
         if (std::fabs(now - bind) > kLengthTolerance * bind + 0.02f) return 0;
         Capsule& o = out[n++];
         for (int k = 0; k < 3; k++) o.a[k] = at[c.a][k], o.b[k] = at[c.b][k];
-        o.r = c.r;
+        o.r = c.r, o.part = c.part;
     }
     return n;
 }
+inline int FitRig(Rows reg, int bones, const Rig& rig, Capsule out[kMaxPerSim]) {
+    if (bones != rig.bones) return 0;
+    return FitJoints(reg, bones, rig.joints.data(), rig.joints.size(), rig.capsules.data(), rig.capsules.size(), out);
+}
+
+// ---- A rig per draw from the skin the game just used (XR-10 part 4) ----
+// Steam 1.67.2, static (wp/XR-10.md part 5): the skin fill 0x0068F3F0 (thiscall, ecx = drawable, one argument: the pose
+// array) writes palette slot i (i < [drawable+0x60]) as BindPose[map58[i]] x Pose[map5C[i]] (4x4 row-vector matrices,
+// 64 bytes each), the first three columns transposed, 0x30 bytes a slot at [drawable+0x70]. map58 = [drawable+0x58]
+// (int32 a slot, an index into the skin's joints), skin = [drawable+0x64]: joint name hashes [skin+0x2C] (uint32), bind
+// poses [skin+0x30] (64 bytes a joint). A joint's hash is FNV-1 32 of its lowercased bone name (0x00575430).
+// The palette is the identity at the bind pose, so a bind pose maps model space to the bone (an inverse bind) and the
+// joint's bind place is the translation of its inverse [I: parameter names; the first smoke logs the pelvis's place].
+
+// FNV-1 32 (multiply, then xor) of the lowercased name, as 0x00575430
+constexpr uint32_t BoneHash(const char* s) {
+    uint32_t h = 0x811C9DC5u;
+    for (; *s; s++) h = (h * 0x01000193u) ^ static_cast<uint8_t>(*s >= 'A' && *s <= 'Z' ? *s + 32 : *s);
+    return h;
+}
+// [V] the exe's own constants: 0x008F50BE, 0x00573872, 0x00573B80
+static_assert(BoneHash("b__Pelvis__") == 0x556B181Au && BoneHash("b__L_Thigh__") == 0xC6035E5Eu && BoneHash("b__Spine0__") == 0x6FA96266u);
+
+// The joints a skin rig names and the capsules between them. Torso: pelvis to the highest of Spine2, Spine1, Spine0 the
+// mesh has. Radii: look constants, UNVERIFIED in game
+enum SkinJoint { kPelvis, kSpine0, kSpine1, kSpine2, kHead, kLThigh, kLCalf, kLFoot, kRThigh, kRCalf, kRFoot, kSkinJoints };
+inline constexpr uint32_t kSkinJointHash[kSkinJoints] = {BoneHash("b__Pelvis__"),  BoneHash("b__Spine0__"),  BoneHash("b__Spine1__"), BoneHash("b__Spine2__"),
+                                                         BoneHash("b__Head__"),    BoneHash("b__L_Thigh__"), BoneHash("b__L_Calf__"), BoneHash("b__L_Foot__"),
+                                                         BoneHash("b__R_Thigh__"), BoneHash("b__R_Calf__"),  BoneHash("b__R_Foot__")};
+enum SkinPart { kTorso = 1, kHeadBall, kLThighCalf, kLCalfFoot, kRThighCalf, kRCalfFoot };
+
+struct SkinRig {
+    int bones = 0; // palette slots of its draw
+    int nj = 0, nc = 0;
+    RigJoint joint[kSkinJoints] = {};
+    RigCapsule cap[kMaxPerSim] = {};
+};
+
+// The rig of one draw from its slots: slotHash[i] the joint name hash of palette slot i, slotBind[i] its bind pose (16
+// floats, row-vector 4x4). False: no named pair (no capsule), n out of 1..60, or bind poses that do not invert
+inline bool RigFromSlots(const uint32_t* slotHash, const float (*slotBind)[16], int n, SkinRig& out) {
+    out = {};
+    if (n <= 0 || n > 60) return false;
+    int slotOf[kSkinJoints];
+    for (int& s : slotOf) s = -1;
+    for (int i = 0; i < n; i++)
+        for (int k = 0; k < kSkinJoints; k++)
+            if (slotHash[i] == kSkinJointHash[k] && slotOf[k] < 0) slotOf[k] = i;
+    out.bones = n;
+    const auto join = [&](int k) { // the joint of SkinJoint k, added on first use; -1 if its bind pose does not invert
+        for (int j = 0; j < out.nj; j++)
+            if (out.joint[j].bone == slotOf[k]) return j;
+        const float* B = slotBind[slotOf[k]]; // row-vector: p' = p R + t, R = rows 0-2 (3x3), t = row 3
+        const double a = B[0], b = B[1], c = B[2], d = B[4], e = B[5], f = B[6], g = B[8], h = B[9], i = B[10];
+        const double det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+        if (!std::isfinite(det) || std::fabs(det) < 1e-6) return -1;
+        const double inv[3][3] = {{(e * i - f * h) / det, (c * h - b * i) / det, (b * f - c * e) / det},
+                                  {(f * g - d * i) / det, (a * i - c * g) / det, (c * d - a * f) / det},
+                                  {(d * h - e * g) / det, (b * g - a * h) / det, (a * e - b * d) / det}};
+        RigJoint& J = out.joint[out.nj];
+        J.bone = slotOf[k];
+        for (int col = 0; col < 3; col++) // the inverse's translation: -t R^-1
+            J.bind[col] = static_cast<float>(-(B[12] * inv[0][col] + B[13] * inv[1][col] + B[14] * inv[2][col]));
+        if (!std::isfinite(J.bind[0]) || !std::isfinite(J.bind[1]) || !std::isfinite(J.bind[2])) return -1;
+        return out.nj++;
+    };
+    const auto add = [&](int ka, int kb, float r, int part) {
+        if (slotOf[ka] < 0 || slotOf[kb] < 0 || out.nc >= kMaxPerSim) return;
+        const int a = join(ka), b = join(kb);
+        if (a >= 0 && b >= 0) out.cap[out.nc++] = {a, b, r, part};
+    };
+    add(kPelvis, slotOf[kSpine2] >= 0 ? kSpine2 : slotOf[kSpine1] >= 0 ? kSpine1 : kSpine0, 0.17f, kTorso);
+    add(kHead, kHead, 0.11f, kHeadBall);
+    add(kLThigh, kLCalf, 0.08f, kLThighCalf);
+    add(kLCalf, kLFoot, 0.06f, kLCalfFoot);
+    add(kRThigh, kRCalf, 0.08f, kRThighCalf);
+    add(kRCalf, kRFoot, 0.06f, kRCalfFoot);
+    return out.nc > 0;
+}
+
+// Pairs a fill with its draw by content: the fill stores its rig keyed by the slot count and the first slot's 12 floats,
+// the draw finds it by the registers it uploaded at c0 (3 a slot, unchanged by the draw 0x0068FD80). Newest first; a
+// sequence word per entry, so a reader on another thread never takes a half-written entry. No allocation.
+// shortcut: two fills with the same count and first slot (one mesh, one pose) share an entry; the rig is the same then
+class SkinRing {
+  public:
+    static constexpr int kSize = 64;
+    void Put(const float first[12], const SkinRig& rig) {
+        const uint32_t at = next_.load(std::memory_order_relaxed);
+        Entry& e = e_[at % kSize];
+        e.seq.fetch_add(1, std::memory_order_acq_rel); // odd: being written
+        std::copy(first, first + 12, e.first);
+        e.rig = rig;
+        e.seq.fetch_add(1, std::memory_order_release);
+        next_.store(at + 1, std::memory_order_release);
+    }
+    // The rig of the newest fill whose palette is `regs` registers from c0 (3 a slot) and starts with c0 (rows c0..c2)
+    bool Find(int regs, const float c0[12], SkinRig& out) const {
+        const uint32_t last = next_.load(std::memory_order_acquire);
+        for (uint32_t k = 0; k < static_cast<uint32_t>(kSize) && k < last; k++) {
+            const Entry& e = e_[(last - 1 - k) % kSize];
+            const uint32_t s0 = e.seq.load(std::memory_order_acquire);
+            if (s0 & 1u || 3 * e.rig.bones != regs || !std::equal(c0, c0 + 12, e.first)) continue;
+            out = e.rig;
+            if (e.seq.load(std::memory_order_acquire) == s0) return true;
+        }
+        return false;
+    }
+
+  private:
+    struct Entry {
+        std::atomic<uint32_t> seq{0};
+        float first[12] = {};
+        SkinRig rig;
+    };
+    Entry e_[kSize];
+    std::atomic<uint32_t> next_{0};
+};
 
 // The fixed column of a standing adult (world y up, metres above the root): the fallback for a draw with no rig fit.
 // Look constants. UNVERIFIED in game
@@ -331,7 +453,7 @@ inline void ToWorld(const double M[4][4], const Capsule* in, int n, Sim& s) {
 }
 
 // One Sim per root merged within kSameSim, nearest the camera first, at most `most`. The first draw's root stays (a Sim's
-// parts share one matrix); the first draw with a fit gives the capsules
+// parts share one matrix); the first draw with a fit gives the capsules, and with a skin rig's parts later draws add theirs
 inline std::vector<Sim> Merge(const std::vector<Sim>& draws, const float cam[3], size_t most) {
     std::vector<Sim> sims;
     for (const Sim& d : draws) {
@@ -344,6 +466,10 @@ inline std::vector<Sim> Merge(const std::vector<Sim>& draws, const float cam[3],
         else if (sims[i].n == 0 && d.n > 0) {
             sims[i].n = d.n;
             for (int k = 0; k < d.n; k++) sims[i].c[k] = d.c[k];
+        } else if (d.n > 0 && sims[i].c[0].part > 0) { // skin rigs: body, head and shoe draws add the parts not there yet
+            Sim& s = sims[i];
+            for (int k = 0; k < d.n && s.n < kMaxPerSim; k++)
+                if (d.c[k].part > 0 && std::none_of(s.c, s.c + s.n, [&](const Capsule& c) { return c.part == d.c[k].part; })) s.c[s.n++] = d.c[k];
         }
     }
     const auto dist = [&](const Sim& s) {

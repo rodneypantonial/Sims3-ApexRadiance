@@ -14,6 +14,7 @@ struct Options {
     int view = 0;            // 0 off, 1 the filtered mask, 2 the raw mask (output 0's r), on screen instead of the multiply
     bool testCaster = false; // developer proof: one capsule under the strongest lamp, beside the Sims' own (XR-08)
     bool meshCasters = false; // the server casts the objects' meshes: once open, MeshCasterSet::pixelCasts (XR-10)
+    bool simRigs = false;     // developer: each Sim draw's rig from the skin fill (gi_sim_rig_hook.h, XR-10 part 4)
 };
 
 void Start(const Options& o); // RealtimeGI::Start

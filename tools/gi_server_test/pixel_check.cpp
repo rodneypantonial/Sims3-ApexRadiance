@@ -25,6 +25,7 @@
 #include "px_stop3.h"
 #include "px_trace0.h"
 #include <array>
+#include <random>
 #include <set>
 #include "features/gi_sim_capsules.h"
 
@@ -860,6 +861,123 @@ void RigCase(const Gpu& g, PScene ps, int w, int h) {
     CheckOcclusion(ps, dr, px, 0.0f, 1, "Sim capsules from the bones: sitting adult, child, lying dog", 0.999);
 }
 
+// 8. Rigs per draw from a skin (XR-10 part 4): the cases of section 7 as the game's skin fill hands them over: slots in a
+// shuffled order with filler joints, each slot's joint name hash and its bind pose (an inverse bind, row-vector 4x4, here
+// with a turn so the inverse is not a plain negation), the palette in the slots' order. Then the pairing ring.
+void SkinCase() {
+    using namespace GiSimCapsules;
+    // section 7's joints in order: pelvis, neck (here Spine2), head, left thigh, calf, foot, right thigh, calf, foot
+    const uint32_t humanNames[9] = {kSkinJointHash[kPelvis], kSkinJointHash[kSpine2], kSkinJointHash[kHead],  kSkinJointHash[kLThigh], kSkinJointHash[kLCalf],
+                                    kSkinJointHash[kLFoot],  kSkinJointHash[kRThigh], kSkinJointHash[kRCalf], kSkinJointHash[kRFoot]};
+    // the dog: pelvis, chest (Spine2), head; its legs carry no human bone name
+    const uint32_t dogNames[3] = {kSkinJointHash[kPelvis], kSkinJointHash[kSpine2], kSkinJointHash[kHead]};
+    const std::vector<rigs::Case> cases = rigs::Cases();
+    std::mt19937 rng(17);
+    SkinRing ring;
+    std::vector<std::array<float, 12>> firsts;
+    std::vector<int> wantCaps, wantBones;
+    for (size_t ci = 0; ci < cases.size(); ci++) {
+        const rigs::Case& c = cases[ci];
+        const bool dog = ci == 2;
+        const size_t named = dog ? 3 : 9;
+        // skin joints: the named ones (with their rig bone) then 7 unnamed fillers on bone 0
+        struct J {
+            uint32_t hash;
+            int bone;
+            float at[3];
+        };
+        std::vector<J> skin;
+        for (size_t k = 0; k < named; k++) {
+            const RigJoint& rj = c.rig.joints[k];
+            skin.push_back({dog ? dogNames[k] : humanNames[k], rj.bone, {rj.bind[0], rj.bind[1], rj.bind[2]}});
+        }
+        for (uint32_t f = 0; f < 7; f++) skin.push_back({0x12345600u + f, 0, {0, 0, 0}});
+        std::vector<int> slotJoint(skin.size()); // map58: slot -> skin joint, shuffled
+        for (size_t i = 0; i < slotJoint.size(); i++) slotJoint[i] = static_cast<int>(i);
+        std::shuffle(slotJoint.begin(), slotJoint.end(), rng);
+        const int n = static_cast<int>(slotJoint.size());
+        uint32_t hash[60];
+        float bind[60][16];
+        static float reg[256][4];
+        std::memset(reg, 0, sizeof reg);
+        const float cs = std::cos(0.7f), sn = std::sin(0.7f);
+        for (int i = 0; i < n; i++) {
+            const J& j = skin[slotJoint[i]];
+            hash[i] = j.hash;
+            // bone-to-model at bind: p R + J (R a turn about y); the inverse bind B = [R^T 0; -J R^T 1]
+            const float R[3][3] = {{cs, 0, -sn}, {0, 1, 0}, {sn, 0, cs}};
+            float* B = bind[i];
+            for (int r = 0; r < 3; r++) {
+                for (int col = 0; col < 3; col++) B[4 * r + col] = R[col][r];
+                B[4 * r + 3] = 0;
+            }
+            for (int col = 0; col < 3; col++) B[12 + col] = -(j.at[0] * R[col][0] + j.at[1] * R[col][1] + j.at[2] * R[col][2]);
+            B[15] = 1;
+            const rigs::Bone& pose = c.pose[j.bone];
+            for (int k = 0; k < 3; k++) reg[3 * i + k][0] = pose.R[k][0], reg[3 * i + k][1] = pose.R[k][1], reg[3 * i + k][2] = pose.R[k][2], reg[3 * i + k][3] = pose.t[k];
+        }
+        SkinRig rig;
+        const bool built = RigFromSlots(hash, bind, n, rig);
+        GiSimCapsules::Capsule fit[kMaxPerSim];
+        const int got = built ? FitJoints(reg, n, rig.joint, rig.nj, rig.cap, rig.nc, fit) : 0;
+        // the wanted ends: section 7's for the human; for the dog its pelvis-chest capsule and a ball at the head
+        std::vector<std::array<float, 6>> want = c.want;
+        if (dog) want = {c.want[0], {c.want[1][3], c.want[1][4], c.want[1][5], c.want[1][3], c.want[1][4], c.want[1][5]}};
+        float worst = got == static_cast<int>(want.size()) ? 0.0f : 1e9f;
+        for (int k = 0; k < got && k < static_cast<int>(want.size()); k++) {
+            for (int a = 0; a < 3; a++) worst = std::max({worst, std::fabs(fit[k].a[a] - want[k][a]), std::fabs(fit[k].b[a] - want[k][3 + a])});
+        }
+        std::printf("  Skin rigs: %s: %d slots, %d joints, %d capsules, ends within %.2f mm\n", c.name, n, rig.nj, got, worst * 1e3f);
+        Check(built && got == static_cast<int>(want.size()) && worst < 0.01f, std::string("Skin rigs: ") + c.name + ": capsules from hashes and bind poses in shuffled slots within 1 cm");
+        Check(!built || (fit[0].part == kTorso && fit[1].part == kHeadBall), std::string("Skin rigs: ") + c.name + ": parts named (torso, head)");
+        std::array<float, 12> first;
+        std::memcpy(first.data(), &reg[0][0], 48);
+        firsts.push_back(first);
+        wantCaps.push_back(rig.nc), wantBones.push_back(n);
+        ring.Put(first.data(), rig);
+    }
+    { // no named joint, a bad bind pose, a slot count out of range
+        uint32_t hash[4] = {1, 2, 3, 4};
+        float bind[4][16] = {};
+        SkinRig r;
+        bool ok = !RigFromSlots(hash, bind, 4, r);
+        hash[0] = kSkinJointHash[kLThigh], hash[1] = kSkinJointHash[kLCalf]; // a pair whose bind poses are all zero: no inverse
+        ok = ok && !RigFromSlots(hash, bind, 4, r) && !RigFromSlots(hash, bind, 0, r) && !RigFromSlots(hash, bind, 61, r);
+        Check(ok, "Skin rigs: no named pair, a bind pose without inverse or a slot count out of 1..60 give no rig");
+    }
+    { // the ring: each draw finds its own fill by count and first slot; another first slot or count finds none
+        bool ok = true;
+        for (size_t i = 0; i < firsts.size(); i++) {
+            SkinRig r;
+            ok = ok && ring.Find(3 * wantBones[i], firsts[i].data(), r) && r.nc == wantCaps[i];
+            ok = ok && !ring.Find(3 * wantBones[i] - 3, firsts[i].data(), r);
+        }
+        std::array<float, 12> other = firsts[0];
+        other[3] += 0.001f;
+        SkinRig r;
+        ok = ok && !ring.Find(3 * wantBones[0], other.data(), r);
+        // 64 later fills push the first ones out; the newest of two equal keys wins
+        SkinRig a{}, b{};
+        a.bones = b.bones = 16, a.nc = 1, b.nc = 2;
+        const float key[12] = {9, 9, 9};
+        for (int k = 0; k < SkinRing::kSize; k++) ring.Put(key, k + 1 < SkinRing::kSize ? a : b);
+        ok = ok && !ring.Find(3 * wantBones[0], firsts[0].data(), r) && ring.Find(48, key, r) && r.nc == 2;
+        Check(ok, "Skin rigs: the ring pairs each draw with its fill by count and first slot, newest first, 64 entries");
+    }
+    { // one Sim's body, head and shoe draws: Merge adds the parts not there yet, once each
+        Sim body{}, head{}, shoes{};
+        body.n = 5, head.n = 1, shoes.n = 2;
+        const int bodyParts[5] = {kTorso, kLThighCalf, kLCalfFoot, kRThighCalf, kRCalfFoot};
+        for (int k = 0; k < 5; k++) body.c[k].part = bodyParts[k];
+        head.c[0].part = kHeadBall, shoes.c[0].part = kLCalfFoot, shoes.c[1].part = kRCalfFoot;
+        const float cam[3] = {0, 0, 0};
+        const std::vector<Sim> one = Merge({body, shoes, head}, cam, 4);
+        bool ok = one.size() == 1 && one[0].n == 6;
+        for (int p = kTorso; p <= kRCalfFoot && ok; p++) ok = std::count_if(one[0].c, one[0].c + one[0].n, [&](const GiSimCapsules::Capsule& c) { return c.part == p; }) == 1;
+        Check(ok, "Skin rigs: a Sim's body, shoe and head draws merge into six capsules, each part once");
+    }
+}
+
 // Every skinned vertex shader of the game's Shaders_Win32.precomp through Analyse (read-only)
 void PrecompCase(const std::string& path) {
     std::FILE* f = nullptr;
@@ -1156,6 +1274,8 @@ int main(int argc, char** argv) {
         SimCase(g, ps, w, h);
         // 7. Sim capsules fitted to the bones of synthetic rigs (XR-10)
         RigCase(g, ps, w, h);
+        // 8. Rigs per draw from a skin, and their pairing with the draws (XR-10 part 4)
+        SkinCase();
         if (!precomp.empty()) PrecompCase(precomp);
     }
     vkDestroyCommandPool(g.dev, g.pool, nullptr);
