@@ -26,7 +26,7 @@ function Get-UntilCommand([string]$Field) {
 }
 function Format-Until($Until) { $p = @($Until.PSObject.Properties)[0]; return "$($p.Value) $($p.Name)" }
 # Every step run.ps1 knows.
-$script:KnownSteps = @('speed', 'wait', 'profile', 'camera', 'camera_pan', 'save', 'reload', 'camera_jumps', 'vfx_burst', 'mode', 'stop_repros', 'key', 'mouse', 'camera_orbit', 'lots', 'lights_on', 'lamp_drag', 'wait_file', 'camera_read', 'camera_goto', 'lamp_edit', 'track_record', 'track_play', 'input_record', 'input_play', 'clip_session', 'floor', 'memory', 'check_files')
+$script:KnownSteps = @('speed', 'wait', 'profile', 'camera', 'camera_pan', 'save', 'reload', 'camera_jumps', 'vfx_burst', 'mode', 'stop_repros', 'key', 'mouse_move', 'camera_orbit', 'lots', 'lights_on', 'lamp_drag', 'wait_file', 'camera_read', 'camera_goto', 'lamp_edit', 'track_record', 'track_play', 'input_record', 'input_play', 'clip_session', 'floor', 'memory', 'check_files')
 
 function ConvertTo-TomlLiteral($Value) {
     if ($Value -is [bool]) { if ($Value) { return 'true' } else { return 'false' } }
@@ -88,6 +88,19 @@ function Get-JobLoads($Job, [string]$Variant, [switch]$AB) {
     $i = 0
     foreach ($n in $order) { $i++; [pscustomobject]@{ Job = $Job; Variant = $n; Index = $i; Name = ('{0}-{1}-{2}' -f $Job.id, $i, $n) } }
 }
+
+# WM_LBUTTONDOWN lParam: y in the high word, x in the low word
+function Get-ClickLParam([int]$X, [int]$Y) { return ($Y -shl 16) -bor ($X -band 0xFFFF) }
+
+# The agent's screenpos reply (World.GetScreenSpacePos) as a client pixel of a W x H window.
+# shortcut: the unit of World.GetScreenSpacePos is unverified; a reply inside 0..1 on both axes is read as fractions of
+# the client area, anything else as pixels. Once a game run shows the unit, drop the other branch.
+function Get-ScreenPoint($Sp, [int]$W, [int]$H) {
+    $x = [double]$Sp.x; $y = [double]$Sp.y
+    if ($x -ge 0 -and $x -le 1 -and $y -ge 0 -and $y -le 1) { $x *= $W; $y *= $H }
+    return @([int][math]::Round($x), [int][math]::Round($y))
+}
+
 
 # A job's steps; without a steps list: set the speed, then one measured wait of `minutes`.
 function Get-JobSteps($JobDef) {

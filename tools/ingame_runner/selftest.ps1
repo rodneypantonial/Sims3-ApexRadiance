@@ -236,6 +236,10 @@ try {
     Check ($null -eq (Step-StartWatch $st $found)) 'a found mailbox never fails the agent rule'
 } finally { Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue }
 
+Check ((Get-ClickLParam 640 360) -eq 23593600 -and (Get-ClickLParam 5 7) -eq 458757) 'click lParam packs y high, x low'
+$sp = Get-ScreenPoint ([pscustomobject]@{ x = 0.25; y = 0.5 }) 1280 720; $px = Get-ScreenPoint ([pscustomobject]@{ x = 640.4; y = 359.6 }) 1280 720
+Check ($sp[0] -eq 320 -and $sp[1] -eq 360 -and $px[0] -eq 640 -and $px[1] -eq 360) 'screenpos: fractions scaled, pixels kept'
+
 # Every shipped job: valid JSON, an id equal to its file name, a save, known steps, patterns that compile
 foreach ($file in Get-ChildItem (Join-Path $PSScriptRoot 'jobs') -Filter *.json) {
     $j = Get-Content -LiteralPath $file.FullName -Raw | ConvertFrom-Json
