@@ -494,6 +494,12 @@ bool BeforeJobsLeft() { return std::any_of(g_shots.begin(), g_shots.end(), [](co
 
 // atPresent false: before the Apex menu draws (filteredSceneBeforeOverlay); jobs that keep the menu wait for Present
 void TakeShots(IDirect3DDevice9* dev, bool atPresent) {
+    // a frame held for seconds (a developer light capture waits on the GPU per draw) does not count against the burst
+    static unsigned long long lastCall = 0;
+    const unsigned long long callAt = GetTickCount64();
+    if (g_playerPhoto.active && lastCall && callAt - lastCall > 1000) // (never past now: the age below is unsigned)
+        g_playerPhoto.requestedAt = (std::min)(g_playerPhoto.requestedAt + (callAt - lastCall - 1000), callAt);
+    lastCall = callAt;
     // a burst that cannot finish (at most 30 s by its settings): the rest dropped, the UI and the menu back
     if (g_playerPhoto.active && (!PlayerJobsLeft() || GetTickCount64() - g_playerPhoto.requestedAt > ApexCapture::kMaxBurstMs + 5000)) {
         if (PlayerJobsLeft()) LOG_WARNING("[Captures] Screenshot burst stopped: it took too long");
