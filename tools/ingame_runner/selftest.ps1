@@ -89,7 +89,7 @@ Check (($liLine -f 'draw', 700, 0, 0, 0, 0, 0) -notmatch $liDraw) 'lamp index dr
 Check (($liLine -f 'draw', 0, 0, 0, 0, 300, 0) -notmatch $liDraw) 'lamp index draw line rejected without draws'
 # The indirect light smoke (S2-05): its counters pattern takes a line with ready texels and draws, not one without
 $giInd = @((Get-Content -LiteralPath (Join-Path $PSScriptRoot 'jobs/gi-indirect-smoke.json') -Raw | ConvertFrom-Json).variants.on.expect)[1]
-$giLine = '12:00:10.000 [INFO] [RealtimeGI] Counters: frames=600 backend=serverRays draws=4 deviceCalls=2 lamps=12 lots=1 lampChanges=0 indirect=atlas atlasReady={0} gridTexels=900 indirectDraws={1} wallDraws=12 rigs=40 rigDraws={2} rigReads=2 rigSkipped=0 indoorRigDraws=5; must be 0: capSolves=0 syncReadbacks=0 locks=0 redrawDiffs=0 readFaults=0 lampTableDiffs=0'
+$giLine = '12:00:10.000 [INFO] [RealtimeGI] Counters: frames=600 backend=serverRays draws=4 deviceCalls=2 lamps=12 lots=1 lampChanges=0 indirect=atlas atlasReady={0} gridTexels=900 indirectDraws={1} wallDraws=12 rigs=40 rigDraws={2} rigReads=2 rigSkipped=0 indoorRigDraws=5 basisDraws=3; must be 0: capSolves=0 syncReadbacks=0 locks=0 redrawDiffs=0 readFaults=0 lampTableDiffs=0'
 Check (($giLine -f 640, 37, 300) -match $giInd) 'GI indirect counters match with ready texels and draws'
 foreach ($bad in @(@(0, 37, 300), @(640, 0, 300), @(640, 37, 0))) { Check (($giLine -f $bad[0], $bad[1], $bad[2]) -notmatch $giInd) "GI indirect counters rejected: atlasReady=$($bad[0]) indirectDraws=$($bad[1]) rigDraws=$($bad[2])" }
 # The G-buffer bridge view (WP11): the counter line with views and no fault, not one with a fault; the off line fails

@@ -85,6 +85,7 @@ enum class Counter : int {
     RigReads,          // probe answers taken from the bridge's asynchronous read-back (no wait: the copy is already there)
     RigSkipped,        // rig binds left alone: the game's overflow lamps hold the vertex-light slots
     IndoorRigDraws,    // (S2-06 item 8b) indoor-object draws (DrawIndoorObject) that keep the grid's vertex lights
+    BasisDraws,        // (S2-06 item 8c) basis-only interior draws (stairs, Counters) that read the GI grid
     Count
 };
 void Add(Counter c, uint32_t n = 1); // any thread
@@ -140,7 +141,7 @@ struct IndirectBind {
     IDirect3DTexture9 *grid = nullptr, *flags = nullptr;
     float uv[4] = {}, k[4] = {}, lamp[4] = {}, size[4] = {};
     bool wall = false;
-    float vs[6][4] = {}; // c[kWallGiVsConst ..]: WallRows r0, r1, (the def), the lot rows
+    float vs[6][4] = {}; // c[kWallGiVsConst ..]: WallRows r0, r1, (the def), the lot rows; floors and ceilings: FloorVsRows in 0, 1
 };
 bool IndirectFor(const void* map, const float ambient[3], float night, IndirectBind& out);
 // (S2-06 item 8b) Render thread, an indoor-object draw: true (counted) when the vertex lights it binds (bound: 4 direction

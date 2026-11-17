@@ -577,6 +577,7 @@ constexpr DWORD kGiUvConst = 215, kGiKConst = 216, kGiLampConst = 217, kGiSizeCo
 struct RoomMapGiPatch {
     int sampler = -1, flagSampler = -1, ambientConst = -1;
     int slots = 0, temps = 0, added = 0; // added: instruction slots the patch added
+    int light = -1, floorSampler = -1;    // PatchBasisGi: the light's temp, the floor light map's sampler
 };
 bool PatchRoomMapGi(std::vector<DWORD>& t, RoomMapGiPatch& out, int texcoord = 4);
 // (real-time GI S2-06) A copy of a vs_3_0 wall vertex shader (InteriorWall's, precomp VS 8507 shape) that also writes the wall
@@ -588,5 +589,25 @@ bool PatchRoomMapGi(std::vector<DWORD>& t, RoomMapGiPatch& out, int texcoord = 4
 // TEXCOORD7 already an output, no free output or temps, no single triple or normal decode. oPos is not touched.
 constexpr DWORD kWallGiVsConst = 242;
 bool PatchWallGiVs(std::vector<DWORD>& t);
+// (real-time GI S2-06 item 8c) The basis-only interior pixel shaders (stairs, the Counters interior passes: light = max(floor map,
+// 4 directional maps, ambient cube), never the rig's light) and any copy of them (PatchBasisSmooth): right after the light's
+// "max rL.xyz" (the first max reading the floor light map read, the last texld of floorSampler; -1 = the sampler the shader reads
+// at an input's .zwzw) the GI grid is read as PatchRoomMapGi reads it (the uv of `slot`, see PatchBasisGiVs, x c[kGiUvConst];
+// the flags against bleed; premultiplied) into G and the light becomes rL k.y + G k.x (k = c[kGiKConst]; no lamp share: the
+// maps hold direct lamp light only, so the grid adds; debug k = (1, 0) shows G alone). Refused (t unchanged): not ps_3_0, flow
+// control before the read, no such max, no free temps or samplers, a constant >= kGiUvConst, the slot's input already read
+// (TEXCOORD7, or the zw of a zw slot). out.light = rL, out.ambientConst = -1.
+bool PatchBasisGi(std::vector<DWORD>& t, RoomMapGiPatch& out, int slot = 14, int floorSampler = -1);
+// Its vertex shader copy: the floor layer's grid uv = (dp4(P, c[kBasisGiVsConst]), dp4(P, c[+1])) (rows GiIndirect::FloorVsRows),
+// P the position the game's light map uv is made from (the one pair "dp4 rU.z, rP, cA; dp4 rU.w, rP, cA+1", either order, rU
+// moved to an output's zw, outside flow control: the world position, w = 1). slot = 2 TEXCOORD index + 1 for its zw: the zw of
+// the highest TEXCOORD the shader declares .xy only, else 2 k: TEXCOORD k.xy as a new output, k the highest TEXCOORD it does not
+// write (a pixel shader that reads that TEXCOORD refuses the GI copy).
+// Relative constants allowed (bone palettes) [I: they end below the vertex lights]. Refused (t unchanged): not vs_3_0, a fixed
+// constant >= kBasisGiVsConst, no free place, no single such pair.
+constexpr DWORD kBasisGiVsConst = 242;
+// Whether a shader declares an input of that usage and index (D3DDECLUSAGE: 10 = COLOR)
+bool ReadsInput(const std::vector<DWORD>& t, int usage, int index);
+bool PatchBasisGiVs(std::vector<DWORD>& t, int& slot);
 
 } // namespace ShaderPatches

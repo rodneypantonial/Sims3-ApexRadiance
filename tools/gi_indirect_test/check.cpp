@@ -809,6 +809,230 @@ void PrecompChecks(const char* path, Gpu& gpu) {
         Check(k.created == k.taken || !gpu.dev, "every patched copy is created natively");
         Check(k.maxSlots <= 512 && k.maxTemps <= 32, "within ps_3_0 limits (512 slots, 32 temps)");
     }
+    // (S2-06 item 8c) the basis-only interior ps_3_0 (stairs, Counters) and the copies Apex draws them with take the GI read
+    // (PatchBasisGi) at the uv slot each of their vertex shaders' copies picks (PatchBasisGiVs); the copy's light is the game's
+    std::map<uint32_t, std::set<uint32_t>> vsOfPs;
+    for (const Tech& tc : techs)
+        for (const auto& [vs, ps] : tc.passes)
+            if (vs >= 1 && vs <= blobs.size() && ps >= 1 && ps <= blobs.size()) vsOfPs[ps - 1].insert(vs - 1);
+    const ShaderPatches::BasisSmoothOptions copyOpts[] = {
+        {.preserveShadows = true},
+        {.preserveShadows = true, .wallMask = true, .floorWall = true},
+        {.preserveShadows = true, .wallMask = true, .floorWall = true, .stairRoomFill = true, .floorTone = true, .storyBlend = true},
+        {.wallMask = true, .smooth = false}};
+    int basisPs = 0, basisTaken = 0, basisCreated = 0, basisSlots = 0, copyTried = 0, copyTaken = 0, copyCreated = 0, sameLight = 0;
+    std::set<uint32_t> basisVs;
+    int bvsTaken = 0, bvsCreated = 0;
+    std::map<int, int> slotUse;
+    for (uint32_t i = 0; i < blobs.size(); i++) {
+        const Blob& b = blobs[i];
+        int s4[4];
+        if (b.vs || b.code.empty() || b.code[0] != 0xFFFF0300 || !ShaderPatches::BasisSamplers(b.code, s4) || ShaderPatches::IsRoomMapPs(b.code)) continue;
+        basisPs++;
+        std::set<int> slots;
+        for (uint32_t v : vsOfPs[i]) {
+            std::vector<DWORD> t = blobs[v].code;
+            int slot = -1;
+            const bool fresh = basisVs.insert(v).second;
+            if (!ShaderPatches::PatchBasisGiVs(t, slot)) {
+                if (fresh) std::printf("  basis VS refused: blob %u\n", v);
+                continue;
+            }
+            slots.insert(slot);
+            if (!fresh) continue;
+            bvsTaken++, slotUse[slot]++;
+            IDirect3DVertexShader9* vs = nullptr;
+            bvsCreated += gpu.dev && SUCCEEDED(gpu.dev->CreateVertexShader(t.data(), &vs));
+            Release(vs);
+        }
+        bool all = !slots.empty();
+        for (const int slot : slots) {
+            std::vector<DWORD> t = b.code;
+            ShaderPatches::RoomMapGiPatch gp;
+            if (!ShaderPatches::PatchBasisGi(t, gp, slot)) {
+                std::printf("  basis ps_3_0 refused: blob %u (slot %d)\n", i, slot);
+                all = false;
+                continue;
+            }
+            basisSlots = std::max(basisSlots, gp.slots);
+            basisCreated += gpu.AcceptsPs(t);
+            for (const auto& o : copyOpts) {
+                std::vector<DWORD> c = b.code;
+                ShaderPatches::BasisSmoothPatch sp;
+                if (!ShaderPatches::PatchBasisSmooth(c, sp, o)) continue;
+                copyTried++;
+                ShaderPatches::RoomMapGiPatch cp;
+                if (!ShaderPatches::PatchBasisGi(c, cp, slot, gp.floorSampler)) continue;
+                copyTaken++, sameLight += cp.light == gp.light;
+                copyCreated += gpu.AcceptsPs(c);
+                basisSlots = std::max(basisSlots, cp.slots);
+            }
+        }
+        basisTaken += all;
+    }
+    std::string slotText;
+    for (const auto& [s, n] : slotUse) slotText += " " + std::to_string(n) + " x slot " + std::to_string(s);
+    std::printf("  basis-only ps_3_0: %d, %d take the GI read at every slot of their VSs (%d copies created natively); smooth copies: %d tried, %d take it "
+                "(%d created, %d with the game's light register); at most %d slots\n",
+                basisPs, basisTaken, basisCreated, copyTried, copyTaken, copyCreated, sameLight, basisSlots);
+    std::printf("  their vs_3_0: %zu, %d take the uv copy (%s), %d created natively\n", basisVs.size(), bvsTaken, slotText.c_str(), bvsCreated);
+    Check(basisPs > 0 && basisTaken == basisPs && (basisCreated > 0 || !gpu.dev), "every basis-only ps_3_0 takes the GI read at its VSs' slots");
+    Check(bvsTaken == static_cast<int>(basisVs.size()) && (bvsCreated == bvsTaken || !gpu.dev), "every basis-only VS takes the grid uv copy, created natively");
+    Check(copyTaken > 0 && sameLight == copyTaken && (copyCreated == copyTaken || !gpu.dev) && basisSlots <= 512, "the smooth copies' GI read adds to the game's light");
+}
+
+// (S2-06 item 8c) The basis copies' uv: FloorVsRows on the world position lands on the floor texel's centre (CPU, plain and rotated
+// lot); on the GPU the VS copy (both uv places: the zw of a TEXCOORD declared .xy, and a new TEXCOORD) and the PS copy in one draw
+// give the texel's grid value at every floor texel; refusals leave the bytes unchanged
+void BasisChecks(Gpu& gpu) {
+    for (const bool rotated : {false, true}) {
+        Scene s = MakeScene(rotated);
+        int texels = 0, centred = 0;
+        for (const auto& [key, slot] : s.built.slots) {
+            float p[3], lp[3];
+            int code;
+            GiIndirect::DecodeKey(key, p, code);
+            if (code != 8) continue;
+            RtLampProxy::ToLot(s.lot, slot.world, lp);
+            float up[3] = {lp[0], lp[1] + 0.9f, lp[2]}, r0[4], r1[4], rows[3][4];
+            uint32_t px = 0;
+            if (!GiIndirect::RigPixel(s.grid, s.lot, up, px)) continue;
+            for (int k = 0; k < 3; k++)
+                for (int j = 0; j < 4; j++) rows[k][j] = s.lot.worldToLot[j][k];
+            texels++;
+            if (!GiIndirect::FloorVsRows(s.grid, lp[1] > 1.5f ? 1 : 0, GiIndirect::kFloor, rows, r0, r1)) continue;
+            const float w[4] = {slot.world[0], slot.world[1], slot.world[2], 1.0f};
+            const float u = (w[0] * r0[0] + w[1] * r0[1] + w[2] * r0[2] + r0[3]) * s.grid.w, v = (w[0] * r1[0] + w[1] * r1[1] + w[2] * r1[2] + r1[3]) * s.grid.h;
+            centred += std::fabs(u - (px % s.grid.w + 0.5f)) < 1e-3f && std::fabs(v - (px / s.grid.w + 0.5f)) < 1e-3f;
+        }
+        std::printf("  basis uv rows (%s lot): %d floor texels, %d at their grid texel's centre\n", rotated ? "rotated" : "plain", texels, centred);
+        Check(texels > 0 && centred == texels, "FloorVsRows gives each floor texel's centre");
+    }
+    // refusals
+    {
+        std::vector<DWORD> noPair = AssemblePs("vs_3_0\ndcl_position v0\ndcl_position o0\ndcl_texcoord o1\nmov o0, v0\ndp4 r2.z, v0, c15\nmov o1, r2\n");
+        const std::vector<DWORD> before = noPair;
+        int slot = 0;
+        Check(!noPair.empty() && !ShaderPatches::PatchBasisGiVs(noPair, slot) && noPair == before && slot == -1, "a VS without the light map uv pair is refused unchanged");
+        std::vector<DWORD> noMax = AssemblePs("ps_3_0\ndcl_texcoord v0\ndcl_2d s0\ntexld r1, v0.zwzw, s0\nmov oC0, r1\n");
+        const std::vector<DWORD> before2 = noMax;
+        ShaderPatches::RoomMapGiPatch gp;
+        Check(!noMax.empty() && !ShaderPatches::PatchBasisGi(noMax, gp) && noMax == before2, "a PS without the light's max is refused unchanged");
+        std::vector<DWORD> reads7 = AssemblePs("ps_3_0\ndef c0, 0, 0, 0, 0\ndcl_texcoord v0\ndcl_texcoord7 v1.xy\ndcl_2d s0\ntexld r1, v0.zwzw, s0\nmax r1.xyz, r1, c0\nadd r1.xy, r1, v1\nmov oC0, r1\n");
+        const std::vector<DWORD> before3 = reads7;
+        Check(!reads7.empty() && !ShaderPatches::PatchBasisGi(reads7, gp, 14) && reads7 == before3, "a PS reading the slot's TEXCOORD itself is refused unchanged");
+    }
+    if (!gpu.dev) return;
+    IDirect3DDevice9* dev = gpu.dev;
+    Scene s = MakeScene(true);
+    IDirect3DTexture9* grid = FloatTexture(dev, s.grid.w, s.grid.h, s.cpuGrid);
+    IDirect3DTexture9 *flags = nullptr, *black = nullptr;
+    if (SUCCEEDED(dev->CreateTexture(s.grid.w, s.grid.h, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &flags, nullptr))) {
+        D3DLOCKED_RECT r{};
+        if (SUCCEEDED(flags->LockRect(0, &r, nullptr, 0))) {
+            for (uint32_t y = 0; y < s.grid.h; y++) std::memcpy(static_cast<char*>(r.pBits) + y * r.Pitch, &s.grid.flags[static_cast<size_t>(y) * s.grid.w * 4], s.grid.w * 4);
+            flags->UnlockRect(0);
+        }
+    }
+    if (SUCCEEDED(dev->CreateTexture(1, 1, 1, 0, D3DFMT_A8R8G8B8, D3DPOOL_MANAGED, &black, nullptr))) {
+        D3DLOCKED_RECT r{};
+        if (SUCCEEDED(black->LockRect(0, &r, nullptr, 0))) *static_cast<DWORD*>(r.pBits) = 0, black->UnlockRect(0);
+    }
+    // points: every floor texel's world place, at its own pixel; the expected value: the texel's grid value
+    struct V {
+        float p[4], c[4];
+    };
+    std::vector<V> pts;
+    std::vector<uint32_t> want;
+    float rows[3][4];
+    for (int k = 0; k < 3; k++)
+        for (int j = 0; j < 4; j++) rows[k][j] = s.lot.worldToLot[j][k];
+    for (const auto& [key, slot] : s.built.slots) {
+        float p[3], lp[3];
+        int code;
+        GiIndirect::DecodeKey(key, p, code);
+        RtLampProxy::ToLot(s.lot, slot.world, lp);
+        float up[3] = {lp[0], lp[1] + 0.9f, lp[2]};
+        uint32_t px = 0;
+        if (code != 8 || lp[1] > 1.5f || !GiIndirect::RigPixel(s.grid, s.lot, up, px) || pts.size() >= 4096) continue; // (story 0: one row set per draw)
+        const int i = static_cast<int>(pts.size());
+        pts.push_back({{slot.world[0], slot.world[1], slot.world[2], 1}, {((i % 64) + 0.5f) / 32.0f - 1.0f, 1.0f - ((i / 64) + 0.5f) / 32.0f, 0.5f, 1}});
+        want.push_back(px);
+    }
+    float r0[4], r1[4];
+    Check(grid && flags && black && !pts.empty() && GiIndirect::FloorVsRows(s.grid, 0, GiIndirect::kFloor, rows, r0, r1), "basis GPU check: textures, points, rows");
+    const char* vsSrc[2] = {
+        // the zw of TEXCOORD1 (declared .xy) carries the uv
+        "vs_3_0\ndef c20, 1, 0, 0, 0\ndcl_position v0\ndcl_texcoord v1\ndcl_position o0\ndcl_texcoord o1\ndcl_texcoord1 o2.xy\nmov r0.xyz, v0\nmov r0.w, c20.x\n"
+        "mov o0, v1\ndp4 r2.z, r0, c15\nmov r2.xy, c20.y\ndp4 r2.w, r0, c16\nmov o1.zw, r2\nmov o1.xy, r2.y\nmov o2.xy, c20.x\n",
+        // every TEXCOORD it writes is whole: a new TEXCOORD7
+        "vs_3_0\ndef c20, 1, 0, 0, 0\ndcl_position v0\ndcl_texcoord v1\ndcl_position o0\ndcl_texcoord o1\nmov r0.xyz, v0\nmov r0.w, c20.x\nmov o0, v1\n"
+        "dp4 r2.w, r0, c16\ndp4 r2.z, r0, c15\nmov r2.xy, c20.y\nmov o1.zw, r2\nmov o1.xy, r2.y\n"};
+    const std::vector<DWORD> psGame = AssemblePs("ps_3_0\ndef c0, 0, 0, 0, 0\ndcl_texcoord v0\ndcl_texcoord1 v1.xy\ndcl_2d s0\ntexld r1, v0.zwzw, s0\nmax r1.xyz, r1, c0\nmov oC0, r1\n");
+    const D3DVERTEXELEMENT9 el[] = {{0, 0, D3DDECLTYPE_FLOAT4, 0, D3DDECLUSAGE_POSITION, 0}, {0, 16, D3DDECLTYPE_FLOAT4, 0, D3DDECLUSAGE_TEXCOORD, 0}, D3DDECL_END()};
+    IDirect3DVertexDeclaration9* decl = nullptr;
+    IDirect3DSurface9 *rt = nullptr, *sys = nullptr;
+    Check(SUCCEEDED(dev->CreateVertexDeclaration(el, &decl)) && SUCCEEDED(dev->CreateRenderTarget(64, 64, D3DFMT_A32B32G32R32F, D3DMULTISAMPLE_NONE, 0, FALSE, &rt, nullptr)) &&
+              SUCCEEDED(dev->CreateOffscreenPlainSurface(64, 64, D3DFMT_A32B32G32R32F, D3DPOOL_SYSTEMMEM, &sys, nullptr)),
+          "basis GPU check: float target");
+    for (int variant = 0; variant < 2 && decl && rt && sys && grid && flags && black; variant++) {
+        std::vector<DWORD> vt = AssemblePs(vsSrc[variant]), pt = psGame;
+        int slot = -1;
+        ShaderPatches::RoomMapGiPatch gp;
+        const bool vok = ShaderPatches::PatchBasisGiVs(vt, slot), pok = vok && ShaderPatches::PatchBasisGi(pt, gp, slot);
+        Check(vok && slot == (variant ? 14 : 3) && pok && gp.floorSampler == 0, variant ? "VS copy: a new TEXCOORD7; PS copy at that slot" : "VS copy: TEXCOORD1.zw; PS copy at that slot");
+        IDirect3DVertexShader9* vs = nullptr;
+        IDirect3DPixelShader9* ps = nullptr;
+        if (!pok || FAILED(dev->CreateVertexShader(vt.data(), &vs)) || FAILED(dev->CreatePixelShader(pt.data(), &ps))) {
+            Check(false, "basis GPU check: the copies are created natively");
+            Release(vs), Release(ps);
+            continue;
+        }
+        const float uvRow[4] = {1, 1, 0, 0}, k[4] = {1, 1, 1, 0}, size[4] = {static_cast<float>(s.grid.w), static_cast<float>(s.grid.h), 1.0f / s.grid.w, 1.0f / s.grid.h};
+        dev->SetPixelShaderConstantF(ShaderPatches::kGiUvConst, uvRow, 1);
+        dev->SetPixelShaderConstantF(ShaderPatches::kGiKConst, k, 1);
+        dev->SetPixelShaderConstantF(ShaderPatches::kGiSizeConst, size, 1);
+        dev->SetVertexShaderConstantF(ShaderPatches::kBasisGiVsConst, r0, 1);
+        dev->SetVertexShaderConstantF(ShaderPatches::kBasisGiVsConst + 1, r1, 1);
+        const float uvRows[2][4] = {{0.1f, 0, 0, 0}, {0, 0, 0.1f, 0}}; // (the game's own light map uv rows: anything)
+        dev->SetVertexShaderConstantF(15, &uvRows[0][0], 2);
+        dev->SetTexture(0, black);
+        dev->SetTexture(static_cast<DWORD>(gp.sampler), grid);
+        dev->SetTexture(static_cast<DWORD>(gp.flagSampler), flags);
+        for (DWORD st : {DWORD(0), static_cast<DWORD>(gp.sampler), static_cast<DWORD>(gp.flagSampler)}) {
+            const DWORD f = st == static_cast<DWORD>(gp.sampler) ? D3DTEXF_LINEAR : D3DTEXF_POINT;
+            dev->SetSamplerState(st, D3DSAMP_MINFILTER, f), dev->SetSamplerState(st, D3DSAMP_MAGFILTER, f), dev->SetSamplerState(st, D3DSAMP_MIPFILTER, D3DTEXF_NONE);
+            dev->SetSamplerState(st, D3DSAMP_ADDRESSU, D3DTADDRESS_CLAMP), dev->SetSamplerState(st, D3DSAMP_ADDRESSV, D3DTADDRESS_CLAMP);
+        }
+        IDirect3DSurface9* old = nullptr;
+        dev->GetRenderTarget(0, &old);
+        dev->SetRenderTarget(0, rt);
+        dev->Clear(0, nullptr, D3DCLEAR_TARGET, 0, 1.0f, 0);
+        dev->SetVertexDeclaration(decl);
+        dev->SetVertexShader(vs);
+        dev->SetPixelShader(ps);
+        dev->BeginScene();
+        Check(SUCCEEDED(dev->DrawPrimitiveUP(D3DPT_POINTLIST, static_cast<UINT>(pts.size()), pts.data(), sizeof(V))), "basis points drawn");
+        dev->EndScene();
+        dev->SetVertexShader(nullptr), dev->SetPixelShader(nullptr);
+        dev->SetRenderTarget(0, old);
+        Release(old);
+        D3DLOCKED_RECT lr{};
+        float worst = 1.0f;
+        if (SUCCEEDED(dev->GetRenderTargetData(rt, sys)) && SUCCEEDED(sys->LockRect(&lr, nullptr, D3DLOCK_READONLY))) {
+            worst = 0.0f;
+            for (size_t i = 0; i < pts.size(); i++) {
+                const float* px = reinterpret_cast<const float*>(static_cast<const char*>(lr.pBits) + (i / 64) * lr.Pitch) + (i % 64) * 4;
+                for (int c = 0; c < 3; c++) worst = std::max(worst, std::fabs(px[c] - s.cpuGrid[static_cast<size_t>(want[i]) * 4 + c]));
+            }
+            sys->UnlockRect();
+        }
+        std::printf("  basis copies in one draw (%s): %zu floor texels, worst %.5f against the texel's grid value\n", variant ? "new TEXCOORD7" : "TEXCOORD1.zw", pts.size(), worst);
+        Check(worst < 1.0f / 512.0f, "the basis VS + PS copies read each floor texel's own grid value");
+        dev->SetTexture(0, nullptr), dev->SetTexture(static_cast<DWORD>(gp.sampler), nullptr), dev->SetTexture(static_cast<DWORD>(gp.flagSampler), nullptr);
+        Release(vs), Release(ps);
+    }
+    Release(sys), Release(rt), Release(decl), Release(black), Release(flags), Release(grid);
 }
 
 } // namespace
@@ -821,6 +1045,7 @@ int main(int argc, char** argv) {
     std::printf("Native D3D9\n");
     DeviceChecks(gpu);
     WallVsChecks(gpu);
+    BasisChecks(gpu);
     if (argc >= 2) PrecompChecks(argv[1], gpu);
     std::printf("%d checks, %d failures\n", g_checks, g_failures);
     return g_failures ? 1 : 0;

@@ -5075,16 +5075,54 @@ bool ProbeCopy(const std::vector<DWORD>& t, int k, std::vector<DWORD>& out, std:
     }
     return false;
 }
+// (GI copies) the grid read into G (irradiance x ready, ready): uv = input uvIn.xy (zw: .zw) x c[kGiUvConst].xy + .zw, the place inside its
+// texel held at the centre on the sides the flags (sampler sF, point) close; temps G, Q, H; the grid at sG
+std::vector<DWORD> GiGridRead(DWORD uvIn, bool zw, DWORD G, DWORD Q, DWORD H, DWORD sG, DWORD sF) {
+    const DWORD cS = kGiSizeConst, cH = kGiSizeConst + 1, X = Sw(0, 0, 0, 0), Y = Sw(1, 1, 1, 1);
+    return {
+        Op(kMad, 4), Dst(kTemp, G, 0x3), Src(kInput, uvIn, zw ? Sw(2, 3, 2, 3) : Sw(0, 1, 0, 1)), Src(kConst, kGiUvConst, Sw(0, 1, 0, 1)), Src(kConst, kGiUvConst, Sw(2, 3, 2, 3)),
+        Op(kTexld, 3), Dst(kTemp, Q), Src(kTemp, G), Src(kSampler, sF),                                  // the texel's flags (point)
+        Op(kMul, 3), Dst(kTemp, G, 0x3), Src(kTemp, G), Src(kConst, cS),                                 // p = uv x size
+        Op(kFrc, 2), Dst(kTemp, H, 0x3), Src(kTemp, G),
+        Op(kAdd, 3), Dst(kTemp, G, 0x3), Src(kTemp, G), Neg(Src(kTemp, H)),                             // floor(p)
+        Op(kAdd, 3), Dst(kTemp, H, 0x3), Src(kTemp, H), Src(kConst, cH, Y),                             // o = frc - 0.5
+        Op(kMul, 3), Dst(kTemp, H, 0xC), Src(kTemp, Q, Sw(0, 0, 1, 3)), Src(kConst, cH, X),             // 0.5 open +u, +v
+        Op(kMul, 3), Dst(kTemp, Q, 0x3), Src(kTemp, Q, Sw(0, 2, 2, 2)), Src(kConst, cH, Y),             // -0.5 open -u, -v
+        Op(kMax, 3), Dst(kTemp, H, 0x3), Src(kTemp, H), Src(kTemp, Q),
+        Op(kMin, 3), Dst(kTemp, H, 0x3), Src(kTemp, H), Src(kTemp, H, Sw(2, 3, 2, 3)),
+        Op(kAdd, 3), Dst(kTemp, G, 0x3), Src(kTemp, G), Src(kConst, cH, X),
+        Op(kAdd, 3), Dst(kTemp, G, 0x3), Src(kTemp, G), Src(kTemp, H),
+        Op(kMul, 3), Dst(kTemp, G, 0x3), Src(kTemp, G), Src(kConst, cS, Sw(2, 3, 2, 3)),
+        Op(kTexld, 3), Dst(kTemp, G), Src(kTemp, G), Src(kSampler, sG),                                  // (irradiance x ready, ready)
+    };
+}
+// (GI copies) the two sampler dcls and the def, applied to copy; out's sampler, slot and temp counts; t = copy
+bool GiFinish(std::vector<DWORD>& t, std::vector<DWORD>& copy, const std::vector<Ins>& ins, std::vector<Edit>& edits, const Usage& u, DWORD sG, DWORD sF, DWORD H,
+              RoomMapGiPatch& out) {
+    const auto slotsOf = [](const std::vector<Ins>& v) {
+        int n = 0;
+        for (const Ins& y : v) n += y.op != kDcl && y.op != kDef && y.op != kDefI && y.op != kDefB ? 1 : 0;
+        return n;
+    };
+    edits.push_back({u.afterLastSamplerDcl, {Op(kDcl, 2), 0x90000000u, Dst(kSampler, sG), Op(kDcl, 2), 0x90000000u, Dst(kSampler, sF)}});
+    edits.push_back({1, {Op(kDef, 5), Dst(kConst, kGiSizeConst + 1), F(0.5f), F(-0.5f), F(0.0f), F(0.0f)}});
+    Apply(copy, std::move(edits));
+    const auto after = Parse(copy);
+    if (after.empty()) return false;
+    out.sampler = static_cast<int>(sG);
+    out.flagSampler = static_cast<int>(sF);
+    out.ambientConst = -1;
+    out.slots = slotsOf(after);
+    out.added = out.slots - slotsOf(ins);
+    out.temps = static_cast<int>(H) + 1;
+    t = std::move(copy);
+    return true;
+}
 bool PatchRoomMapGi(std::vector<DWORD>& t, RoomMapGiPatch& out, int texcoord) {
     out = RoomMapGiPatch{};
     if (t.empty() || t[0] != 0xFFFF0300) return false;
     const auto ins = Parse(t);
     if (ins.empty()) return false;
-    const auto slotsOf = [&](const std::vector<Ins>& v) {
-        int n = 0;
-        for (const Ins& y : v) n += y.op != kDcl && y.op != kDef && y.op != kDefI && y.op != kDefB ? 1 : 0;
-        return n;
-    };
     int at = -1, found = 0;
     for (size_t i = 0; i < ins.size(); i++) {
         const Ins& y = ins[i];
@@ -5109,46 +5147,170 @@ bool PatchRoomMapGi(std::vector<DWORD>& t, RoomMapGiPatch& out, int texcoord) {
     DWORD uvIn = 0;
     if (!InputFor(copy, ins, texcoord, edits, uvIn)) return false;
     const DWORD G = static_cast<DWORD>(u.maxTemp + 1), Q = G + 1, H = G + 2, sG = static_cast<DWORD>(u.maxSampler + 1), sF = sG + 1;
-    const DWORD cS = kGiSizeConst, cH = kGiSizeConst + 1;
     const Ins& m = ins[static_cast<size_t>(at)];
     const DWORD L = Num(copy[m.at + 2]), cA = Num(copy[m.at + 3]);
     const DWORD X = Sw(0, 0, 0, 0), Y = Sw(1, 1, 1, 1), Z = Sw(2, 2, 2, 2), W = Sw(3, 3, 3, 3);
-    const std::vector<DWORD> code = {
-        Op(kMad, 4), Dst(kTemp, G, 0x3), Src(kInput, uvIn, Sw(0, 1, 0, 1)), Src(kConst, kGiUvConst, Sw(0, 1, 0, 1)), Src(kConst, kGiUvConst, Sw(2, 3, 2, 3)),
-        Op(kTexld, 3), Dst(kTemp, Q), Src(kTemp, G), Src(kSampler, sF),                                  // the texel's flags (point)
-        Op(kMul, 3), Dst(kTemp, G, 0x3), Src(kTemp, G), Src(kConst, cS),                                 // p = uv x size
-        Op(kFrc, 2), Dst(kTemp, H, 0x3), Src(kTemp, G),
-        Op(kAdd, 3), Dst(kTemp, G, 0x3), Src(kTemp, G), Neg(Src(kTemp, H)),                             // floor(p)
-        Op(kAdd, 3), Dst(kTemp, H, 0x3), Src(kTemp, H), Src(kConst, cH, Y),                             // o = frc - 0.5
-        Op(kMul, 3), Dst(kTemp, H, 0xC), Src(kTemp, Q, Sw(0, 0, 1, 3)), Src(kConst, cH, X),             // 0.5 open +u, +v
-        Op(kMul, 3), Dst(kTemp, Q, 0x3), Src(kTemp, Q, Sw(0, 2, 2, 2)), Src(kConst, cH, Y),             // -0.5 open -u, -v
-        Op(kMax, 3), Dst(kTemp, H, 0x3), Src(kTemp, H), Src(kTemp, Q),
-        Op(kMin, 3), Dst(kTemp, H, 0x3), Src(kTemp, H), Src(kTemp, H, Sw(2, 3, 2, 3)),
-        Op(kAdd, 3), Dst(kTemp, G, 0x3), Src(kTemp, G), Src(kConst, cH, X),
-        Op(kAdd, 3), Dst(kTemp, G, 0x3), Src(kTemp, G), Src(kTemp, H),
-        Op(kMul, 3), Dst(kTemp, G, 0x3), Src(kTemp, G), Src(kConst, cS, Sw(2, 3, 2, 3)),
-        Op(kTexld, 3), Dst(kTemp, G), Src(kTemp, G), Src(kSampler, sG),                                  // (irradiance x ready, ready)
+    std::vector<DWORD> code = GiGridRead(uvIn, false, G, Q, H, sG, sF);
+    code.insert(code.end(), {
         Op(kMul, 3), Dst(kTemp, G, 0x7), Src(kTemp, G), Src(kConst, kGiKConst, X),                     // G k.x
         Op(kMul, 3), Dst(kTemp, H, 0x8), Src(kTemp, G, W), Src(kTemp, L, W),                           // alpha a
         Op(kMad, 4), Dst(kTemp, G, 0x7), Neg(Src(kTemp, H, W)), Src(kConst, kGiLampConst), Src(kTemp, G), // - alpha a L
         Op(kMad, 4), Dst(kTemp, G, 0x7), Src(kTemp, L), Src(kConst, kGiKConst, Y), Src(kTemp, G),       // rgb'
         Op(kMul, 3), Dst(kTemp, G, 0x8), Src(kTemp, L, W), Src(kConst, kGiKConst, Z),                   // alpha'
-    };
+    });
     copy[m.at + 2] = (copy[m.at + 2] & ~0x7FFu) | G; // the game's mad reads G for rL (its swizzles kept)
     copy[m.at + 4] = (copy[m.at + 4] & ~0x7FFu) | G;
     edits.push_back({m.at, code});
-    edits.push_back({u.afterLastSamplerDcl, {Op(kDcl, 2), 0x90000000u, Dst(kSampler, sG), Op(kDcl, 2), 0x90000000u, Dst(kSampler, sF)}});
-    edits.push_back({1, {Op(kDef, 5), Dst(kConst, cH), F(0.5f), F(-0.5f), F(0.0f), F(0.0f)}});
-    Apply(copy, std::move(edits));
-    const auto after = Parse(copy);
-    if (after.empty()) return false;
-    out.sampler = static_cast<int>(sG);
-    out.flagSampler = static_cast<int>(sF);
-    out.ambientConst = static_cast<int>(cA);
-    out.slots = slotsOf(after);
-    out.added = out.slots - slotsOf(ins);
-    out.temps = static_cast<int>(H) + 1;
-    t = std::move(copy);
+    return GiFinish(t, copy, ins, edits, u, sG, sF, H, out) && (out.ambientConst = static_cast<int>(cA), true);
+}
+bool PatchBasisGi(std::vector<DWORD>& t, RoomMapGiPatch& out, int slot, int floorSampler) {
+    out = RoomMapGiPatch{};
+    if (t.empty() || t[0] != 0xFFFF0300 || slot < 0 || slot > 15) return false;
+    const auto ins = Parse(t);
+    if (ins.empty()) return false;
+    // the floor light map read: the last texld of its sampler (the one the game reads at an input's .zwzw, where not given)
+    for (size_t i = 0; i < ins.size() && floorSampler < 0; i++) {
+        const Ins& x = ins[i];
+        if (x.op == kTexld && x.len == 3 && Type(t[x.at + 2]) == kInput && Swz(t[x.at + 2]) == kSwzZWZW && !(t[x.at + 2] & 0x0F000000u))
+            floorSampler = static_cast<int>(Num(t[x.at + 3]));
+    }
+    int fr = -1;
+    for (size_t i = 0; i < ins.size(); i++)
+        if (ins[i].op == kTexld && ins[i].len == 3 && Type(t[ins[i].at + 1]) == kTemp && IsReg(t[ins[i].at + 3], kSampler, static_cast<DWORD>(floorSampler)))
+            fr = static_cast<int>(i);
+    if (fr < 0) return false;
+    // the light: the first "max rL.xyz" reading the floor read's value (followed through the temps written from it)
+    uint32_t tracked = 1u << Num(t[ins[static_cast<size_t>(fr)].at + 1]);
+    int at = -1;
+    for (size_t i = 0; i < ins.size() && at < 0; i++) {
+        const Ins& y = ins[i];
+        if (IsFlow(y.op)) return false; // (the read must not sit in flow control: texld's gradients)
+        if (static_cast<int>(i) <= fr || y.len < 2 || y.op == kDcl || y.op == kDef || y.op == kDefI || y.op == kDefB) continue;
+        const DWORD d = t[y.at + 1];
+        if (Type(d) != kTemp) continue;
+        bool reads = false;
+        for (size_t k = 2; k <= y.len; k++) reads |= Type(t[y.at + k]) == kTemp && (tracked >> Num(t[y.at + k]) & 1);
+        if (y.op == kMax && reads && (WMask(d) & 0x7) == 0x7 && !(d & 0x00100000u)) at = static_cast<int>(i); // (no _sat; _pp is fine)
+        else if (reads) tracked |= 1u << Num(d);
+        else if ((WMask(d) & 0x7) == 0x7) tracked &= ~(1u << Num(d));
+    }
+    if (at < 0) return false;
+    const Usage u = Scan(t, ins);
+    // (the two lowest samplers it does not declare: the stairs' copy with the story blend uses up to s14, but not s5)
+    uint32_t used = 0;
+    for (const Ins& x : ins)
+        if (x.op == kDcl && Type(t[x.at + 2]) == kSampler) used |= 1u << Num(t[x.at + 2]);
+    DWORD sG = 0;
+    while (sG < 16 && (used >> sG & 1)) sG++;
+    DWORD sF = sG + 1;
+    while (sF < 16 && (used >> sF & 1)) sF++;
+    if (u.maxTemp + 3 >= 32 || sF >= 16 || !u.afterLastSamplerDcl || u.maxConst >= static_cast<int>(kGiUvConst)) return false;
+    const int texcoord = slot / 2;
+    const bool zw = slot & 1;
+    for (const Ins& x : ins) // (TEXCOORD7: a new input; zw: the game's input must not read its zw already)
+        if (x.op == kDcl && Type(t[x.at + 2]) == kInput && (t[x.at + 1] & 0x1F) == 5 && ((t[x.at + 1] >> 16) & 0xF) == static_cast<DWORD>(texcoord) &&
+            (!zw || (WMask(t[x.at + 2]) & 0xC)))
+            return false;
+    std::vector<DWORD> copy = t;
+    std::vector<Edit> edits;
+    DWORD uvIn = 0;
+    if (!InputFor(copy, ins, texcoord, edits, uvIn)) return false;
+    const DWORD G = static_cast<DWORD>(u.maxTemp + 1), Q = G + 1, H = G + 2;
+    const Ins& m = ins[static_cast<size_t>(at)];
+    const DWORD L = Num(copy[m.at + 1]), X = Sw(0, 0, 0, 0), Y = Sw(1, 1, 1, 1);
+    std::vector<DWORD> code = GiGridRead(uvIn, zw, G, Q, H, sG, sF);
+    code.insert(code.end(), {
+        Op(kMul, 3), Dst(kTemp, G, 0x7), Src(kTemp, G), Src(kConst, kGiKConst, X),               // G k.x
+        Op(kMad, 4), Dst(kTemp, L, 0x7), Src(kTemp, L), Src(kConst, kGiKConst, Y), Src(kTemp, G), // L k.y + G k.x
+    });
+    edits.push_back({End(m), code});
+    if (!GiFinish(t, copy, ins, edits, u, sG, sF, H, out)) return false;
+    out.light = static_cast<int>(L), out.floorSampler = floorSampler;
+    return true;
+}
+bool ReadsInput(const std::vector<DWORD>& t, int usage, int index) {
+    if (t.empty()) return false;
+    for (const Ins& x : Parse(t))
+        if (x.op == kDcl && x.len == 2 && Type(t[x.at + 2]) == kInput && (t[x.at + 1] & 0x1F) == static_cast<DWORD>(usage) &&
+            ((t[x.at + 1] >> 16) & 0xF) == static_cast<DWORD>(index))
+            return true;
+    return false;
+}
+bool PatchBasisGiVs(std::vector<DWORD>& t, int& slot) {
+    slot = -1;
+    if (t.empty() || t[0] != 0xFFFE0300 || t.back() != 0x0000FFFFu) return false;
+    const auto ins = Parse(t);
+    if (ins.empty()) return false;
+    constexpr DWORD kMaxOut = 12;
+    std::vector<bool> outUsed(kMaxOut, false);
+    int tcOut[8] = {-1, -1, -1, -1, -1, -1, -1, -1}, tcMask[8] = {}, tcDcl[8] = {};
+    size_t afterLastDcl = 0;
+    for (size_t i = 0; i < ins.size(); i++) {
+        const Ins& x = ins[i];
+        if (x.op != kDcl) continue;
+        const DWORD use = t[x.at + 1] & 0x1F, idx = (t[x.at + 1] >> 16) & 0xF, r = t[x.at + 2];
+        if (Type(r) == kOutput) {
+            if (Num(r) < kMaxOut) outUsed[Num(r)] = true;
+            if (use == 5 && idx < 8) tcOut[idx] = static_cast<int>(Num(r)), tcMask[idx] = static_cast<int>(WMask(r)), tcDcl[idx] = static_cast<int>(i);
+        }
+        afterLastDcl = End(x);
+    }
+    const Usage u = Scan(t, ins);
+    if (u.maxConst >= static_cast<int>(kBasisGiVsConst) || !afterLastDcl) return false;
+    // the light map uv pair: "dp4 rU.z, rP, cA" and, before rP is written again, "dp4 rU.w, rP, cA+1" (either order; full swizzles,
+    // no modifiers), rU later moved to an output's zw; the copy's rows go right after the first, outside flow control
+    const auto plain = [&](DWORD r) { return Swz(r) == kSwzXYZW && !(r & 0x0F000000u) && !(r & 0x2000); };
+    const auto writes = [&](const Ins& x, DWORD r) { return x.op != kDcl && x.op != kDef && x.len >= 1 && IsReg(t[x.at + 1], kTemp, r); };
+    int pair = -1, depth = 0, pairDepth = 0;
+    for (size_t i = 0; i < ins.size(); i++) {
+        const DWORD op = ins[i].op;
+        depth += (op == 0x28 || op == 0x29 || op == 0x1B || op == 0x26) ? 1 : (op == 0x2B || op == 0x1D || op == 0x27) ? -1 : 0; // if ifc loop rep / endif endloop endrep
+        const Ins& y = ins[i];
+        if (y.op != kDp4 || y.len != 3) continue;
+        const DWORD d0 = t[y.at + 1], p0 = t[y.at + 2], c0 = t[y.at + 3];
+        if (Type(d0) != kTemp || (d0 & 0x00F00000u) || (WMask(d0) != 0x4 && WMask(d0) != 0x8) || Type(p0) != kTemp || !plain(p0) || Type(c0) != kConst ||
+            !plain(c0) || Num(d0) == Num(p0))
+            continue;
+        const bool zFirst = WMask(d0) == 0x4;
+        const DWORD d1 = (d0 & ~0x000F0000u) | ((zFirst ? 0x8u : 0x4u) << 16);
+        bool second = false, moved = false;
+        for (size_t k = i + 1; k < ins.size() && !second; k++) {
+            const Ins& z = ins[k];
+            if (z.op == kDp4 && z.len == 3 && t[z.at + 1] == d1 && t[z.at + 2] == p0 && Type(t[z.at + 3]) == kConst && plain(t[z.at + 3]) &&
+                Num(t[z.at + 3]) + (zFirst ? 0 : 1) == Num(c0) + (zFirst ? 1 : 0))
+                second = true;
+            else if (writes(z, Num(p0))) break;
+        }
+        for (size_t k = i + 1; k < ins.size() && second && !moved; k++) {
+            const Ins& x = ins[k];
+            moved = x.op == kMov && x.len == 2 && Type(t[x.at + 1]) == kOutput && WMask(t[x.at + 1]) == 0xC && IsReg(t[x.at + 2], kTemp, Num(d0)) &&
+                    (Swz(t[x.at + 2]) & 0xF0) == 0xE0; // (.zw from .zw)
+        }
+        if (!moved) continue;
+        if (pair >= 0) return false;
+        pair = static_cast<int>(i), pairDepth = depth;
+    }
+    if (pair < 0 || pairDepth != 0) return false;
+    // the uv's place: the zw of the highest TEXCOORD declared .xy only (no pixel shader of a matched pair reads that zw), else the
+    // highest TEXCOORD it does not write, as a new output (a pixel shader reading that TEXCOORD refuses the GI copy)
+    DWORD out = 0, mask = 0xC;
+    std::vector<Edit> edits;
+    for (int k = 7; k >= 0 && slot < 0; k--)
+        if (tcOut[k] >= 0 && tcMask[k] == 0x3) slot = 2 * k + 1, out = static_cast<DWORD>(tcOut[k]);
+    if (slot >= 0) {
+        t[ins[static_cast<size_t>(tcDcl[slot / 2])].at + 2] |= 0x000F0000u; // (.xyzw: the game's xy and the uv)
+    } else {
+        int k = 7;
+        while (k >= 0 && tcOut[k] >= 0) k--;
+        while (out < kMaxOut && outUsed[out]) out++;
+        if (k < 0 || out >= kMaxOut) return false;
+        slot = 2 * k, mask = 0x3;
+        edits.push_back({afterLastDcl, {Op(kDcl, 2), 0x80000005u | (static_cast<DWORD>(k) << 16), Dst(kOutput, out, 0x3)}});
+    }
+    const DWORD P = Num(t[ins[static_cast<size_t>(pair)].at + 2]);
+    edits.push_back({End(ins[static_cast<size_t>(pair)]), {Op(kDp4, 3), Dst(kOutput, out, mask & 0x5), Src(kTemp, P), Src(kConst, kBasisGiVsConst),
+                                                              Op(kDp4, 3), Dst(kOutput, out, mask & 0xA), Src(kTemp, P), Src(kConst, kBasisGiVsConst + 1)}});
+    Apply(t, std::move(edits));
     return true;
 }
 bool PatchWallGiVs(std::vector<DWORD>& t) {

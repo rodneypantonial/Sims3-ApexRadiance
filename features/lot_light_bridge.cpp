@@ -8465,6 +8465,86 @@ void ReleaseGiWallVs() {
     }
     g_roomMapGiWallVs.clear();
 }
+// (S2-06 item 8c) The basis-only interior draws (stairs, the Counters interior passes) read the GI grid: their vertex shader copy
+// writing the floor layer's grid uv (ShaderPatches::PatchBasisGiVs: the copy and its uv slot, by the game's shader, held as
+// g_roomMapGiWallVs's are) and the pixel shader copy adding the grid to the light (PatchBasisGi), by slot and by the shader it
+// was made from (the game's, or a smooth copy of it)
+std::unordered_map<IDirect3DVertexShader9*, std::pair<IDirect3DVertexShader9*, int>> g_basisGiVs;
+std::map<int, std::unordered_map<IDirect3DPixelShader9*, PatchedPs>> g_basisGiPs;
+void ReleaseBasisGi() {
+    for (auto& [game, copy] : g_basisGiVs) {
+        if (copy.first) copy.first->Release();
+        game->Release();
+    }
+    g_basisGiVs.clear();
+    for (auto& [slot, cache] : g_basisGiPs)
+        for (auto& [k, p] : cache)
+            if (p.ps) p.ps->Release();
+    g_basisGiPs.clear();
+}
+// Draws with the GI copies when the grid covers the draw's floor light map (counted); false: nothing done, the caller draws.
+// ps: the pixel shader the caller has set (g_curPs or its smooth copy). Inside or outside the caller's own-call span.
+template <typename DrawFn> bool DrawBasisGi(IDirect3DDevice9* dev, IDirect3DPixelShader9* ps, DrawFn draw) {
+    if (!RealtimeGI::Running() || !g_curVs || !g_curPs || !ps) return false;
+    auto [vit, fresh] = g_basisGiVs.try_emplace(g_curVs, nullptr, -1);
+    if (fresh) {
+        g_curVs->AddRef();
+        UINT size = 0;
+        std::vector<DWORD> t;
+        if (SUCCEEDED(g_curVs->GetFunction(nullptr, &size)) && size >= 8 && size <= 65536 && size % 4 == 0) {
+            t.resize(size / 4);
+            if (FAILED(g_curVs->GetFunction(t.data(), &size))) t.clear();
+        }
+        int slot = -1;
+        if (!t.empty() && ShaderPatches::PatchBasisGiVs(t, slot) && SUCCEEDED(dev->CreateVertexShader(t.data(), &vit->second.first)))
+            vit->second.second = slot, LOG_INFO(std::format("[LotLightBridge] Real-time GI: vertex shader {:08X} writes the floor grid uv (slot {})", reinterpret_cast<uintptr_t>(g_curVs), slot));
+        else vit->second.first = nullptr;
+    }
+    IDirect3DVertexShader9* const vs = vit->second.first;
+    if (!vs) return false;
+    PatchedPs& p = g_basisGiPs[vit->second.second][ps];
+    if (!p.tried) {
+        p.tried = true;
+        const std::vector<DWORD> game = ShaderCode(g_curPs);
+        std::vector<DWORD> t = ShaderCode(ps);
+        ShaderPatches::RoomMapGiPatch g;
+        std::vector<DWORD> probe = game; // (the floor read's sampler, from the game's shader: a wall copy reads it at a moved uv)
+        // an object vertex shader feeds COLOR0 the rig's vertex lights, which already hold the grid (item 8): no second share
+        const bool rigColor = g_curVsIsObject && ShaderPatches::ReadsInput(game, 10, 0);
+        if (!rigColor && !t.empty() && ShaderPatches::PatchBasisGi(probe, g, vit->second.second) && ShaderPatches::PatchBasisGi(t, p.gi, vit->second.second, g.floorSampler) &&
+            SUCCEEDED(dev->CreatePixelShader(t.data(), &p.ps)))
+            LOG_INFO(std::format("[LotLightBridge] Real-time GI: copy {:08X} reads the GI grid (basis, slot {}; {} slots, {} added)", reinterpret_cast<uintptr_t>(ps),
+                                 vit->second.second, p.gi.slots, p.gi.added));
+        else p.ps = nullptr;
+    }
+    if (!p.ps) return false;
+    IDirect3DBaseTexture9* const map = D3D9Hooks::BoundTexture(dev, static_cast<DWORD>(p.gi.floorSampler));
+    RealtimeGI::IndirectBind gi;
+    const float noAmbient[3] = {};
+    if (!map || !RealtimeGI::IndirectFor(RtOutdoorLamps::GameMapOf(map), noAmbient, g_night.load(std::memory_order_relaxed), gi) || gi.wall) return false;
+    const bool own = g_inOwnCall;
+    g_inOwnCall = true;
+    float oldPs[16] = {}, oldVs[8] = {};
+    dev->GetPixelShaderConstantF(ShaderPatches::kGiUvConst, oldPs, 4);
+    dev->GetVertexShaderConstantF(ShaderPatches::kBasisGiVsConst, oldVs, 2);
+    float rows[16] = {1, 1, 0, 0}; // (uv row: the VS copy writes the grid uv itself)
+    std::memcpy(rows + 4, gi.k, 16), std::memcpy(rows + 8, gi.lamp, 16), std::memcpy(rows + 12, gi.size, 16);
+    SetPsConst(dev, ShaderPatches::kGiUvConst, rows, 4);
+    SetVsConst(dev, ShaderPatches::kBasisGiVsConst, &gi.vs[0][0], 2);
+    {
+        const WallMaskBind grid(dev, static_cast<DWORD>(p.gi.sampler), gi.grid, static_cast<DWORD>(D3DTEXF_LINEAR));
+        const WallMaskBind flags(dev, static_cast<DWORD>(p.gi.flagSampler), gi.flags);
+        IDirect3DVertexShader9* const originalVs = g_curVs;
+        SetVs(dev, vs), SetPs(dev, p.ps);
+        draw();
+        SetPs(dev, ps), SetVs(dev, originalVs);
+    }
+    SetVsConst(dev, ShaderPatches::kBasisGiVsConst, oldVs, 2);
+    SetPsConst(dev, ShaderPatches::kGiUvConst, oldPs, 4);
+    g_inOwnCall = own;
+    RealtimeGI::Add(RealtimeGI::Counter::BasisDraws);
+    return true;
+}
 // rows: the arch rows (kArchRows) for a copy with the arch block, nullptr for a copy without it; nbCube: ArchRowsFor's
 template <typename DrawFn> void DrawWithRoomMap(IDirect3DDevice9* dev, IDirect3DPixelShader9* copy, const ShaderPatches::RoomMapPatch& p, const float size[4],
                                                 const float band[4], const float* rows, IDirect3DBaseTexture9* nbCube, DrawFn draw) {
@@ -8741,7 +8821,7 @@ template <typename DrawFn> bool DrawBasisSmooth(IDirect3DDevice9* dev, DrawFn dr
                 u0.emplace(dev, b, upTex[0], D3DTEXF_NONE), u1.emplace(dev, b + 1, upTex[1], D3DTEXF_NONE), u2.emplace(dev, b + 2, upTex[2], D3DTEXF_NONE), u3.emplace(dev, b + 3, upTex[3], D3DTEXF_NONE);
                 uA.emplace(dev, static_cast<DWORD>(p.smooth.upAmbSampler), static_cast<IDirect3DTexture9*>(upTex[4]));
             }
-            draw();
+            if (!DrawBasisGi(dev, p.ps, draw)) draw();
             if (blend) {
                 u0.reset(), u1.reset(), u2.reset(), u3.reset(), uA.reset();
                 SetPsConst(dev, static_cast<DWORD>(p.smooth.storyConst), oldStory, 1);
@@ -8749,11 +8829,11 @@ template <typename DrawFn> bool DrawBasisSmooth(IDirect3DDevice9* dev, DrawFn dr
             g_ambFillDraws.fetch_add(1, std::memory_order_relaxed);
         } else {
             const WallMaskBind bind(dev, static_cast<DWORD>(p.smooth.maskSampler), wallMask);
-            draw(); // (as the plain copy: within the own-call span)
+            if (!DrawBasisGi(dev, p.ps, draw)) draw(); // (as the plain copy: within the own-call span)
         }
         if (p.smooth.floorConst >= 0) SetPsConst(dev, static_cast<DWORD>(p.smooth.floorConst), oldFloor, 1);
         g_wallMaskDraws.fetch_add(1, std::memory_order_relaxed);
-    } else
+    } else if (!DrawBasisGi(dev, p.ps, draw)) // (real-time GI S2-06 item 8c: the stairs' copy with the GI read)
         draw();
     SetPs(dev, original);
     SetPsConst(dev, p.smooth.sizeConst, oldSize, 1);
@@ -9906,6 +9986,7 @@ enum class ClaimSource : uint8_t {
     FoliageVertex,
     WindowOutdoorLight,
     RoomMapSmooth,
+    IndoorBasisGi,
     Count,
 };
 constexpr size_t kClaimSourceCount = static_cast<size_t>(ClaimSource::Count);
@@ -9935,6 +10016,7 @@ constexpr std::array<const char*, kClaimSourceCount> kClaimSourceNames = {
     "FoliageVertex",
     "WindowOutdoorLight",
     "RoomMapSmooth",
+    "IndoorBasisGi",
 };
 UINT g_curPrims = 0; // primitive count of the current hooked draw; set by both DrawPrimitive and DrawIndexedPrimitive
 uint32_t g_claimSourceMask = 0; // render thread; meaningful only while a development census draw is being attributed
@@ -10066,6 +10148,8 @@ template <typename DrawFn> D3D9Hooks::HookAction OnDrawInnerCore(IDirect3DDevice
     if (g_curClass == PsClass::LotLightMelt) return DrawLotMelt(dev, draw) ? NoteClaim(ClaimSource::LotSnowLight) : kContinue; // its VS looks like an object rig
     if (g_curVsIsObject && g_curPsBasis && DrawWindowOutdoor(dev, draw)) return NoteClaim(ClaimSource::WindowOutdoorLight); // experimental, off by default
     if (g_curVsIsObject && DrawIndoorObject(dev, draw)) return NoteClaim(ClaimSource::IndoorObjectSmooth);
+    // (real-time GI S2-06 item 8c) the Counters interior passes (an object vertex shader, a basis-only pixel shader): the game's shader with the GI read
+    if (g_curVsIsObject && g_curPsBasis && !g_curPsRoomMap && DrawBasisGi(dev, g_curPs, draw)) return NoteClaim(ClaimSource::IndoorBasisGi);
     if (g_curVsIsObject && DrawObjectLamp(dev, draw)) return NoteClaim(ClaimSource::OutdoorObjectGroundLight);
     if (g_curClass == PsClass::LotLightSnow || g_curClass == PsClass::LotLightSnowCut)
         return DrawLotSnow(dev, draw, g_curClass == PsClass::LotLightSnowCut) ? NoteClaim(ClaimSource::LotSnowLight) : kContinue;
@@ -12892,6 +12976,7 @@ void Shutdown(bool keepChunkMaps) {
     g_curVsInfo = nullptr;
     g_vsInfo.clear();
     ReleaseGiWallVs(); // (real-time GI S2-06)
+    ReleaseBasisGi();
     g_vsInfoGen++; // (ClassifyVs's front cache)
     if (g_roofSnowPs) {
         g_roofSnowPs->Release();
@@ -13017,7 +13102,7 @@ void MeasureMemoryImpl() {
                           &g_basisSmoothPs, &g_roomMapSmoothPs, &g_basisRoomPs, &g_basisSmoothWallPs, &g_basisRoomWallPs, &g_basisSmoothFillPs, &g_cubeTintPs, &g_roomMapSmoothArchPs, &g_basisRoomArchPs, &g_basisRoomWallArchPs,
                           &g_windowWallPs, &g_windowWallPsReach, &g_roomMapWallPs, &g_roomMapGiPs, &g_roomMapGiWallPs})
         ps(*m);
-    for (const auto* t : {&g_floorShadePs, &g_indoorPs, &g_floorAtlasPs, &g_furnitureFloorPs}) {
+    for (const auto* t : {&g_floorShadePs, &g_indoorPs, &g_floorAtlasPs, &g_furnitureFloorPs, &g_basisGiPs}) {
         patched += Tree(*t);
         for (const auto& [k, m] : *t) ps(m);
     }

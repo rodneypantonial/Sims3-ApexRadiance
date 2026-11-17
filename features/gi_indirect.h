@@ -204,6 +204,18 @@ inline bool UvRow(const Grid& g, int story, int kind, float c[4]) {
     return true;
 }
 
+// (S2-06 item 8c) The basis copies' vertex shader rows (ShaderPatches::PatchBasisGiVs): grid uv = (dp4((world, 1), r0),
+// dp4((world, 1), r1)), UvRow's uv at the world position's lot place; lotRows = worldToLot by column (lot k = dp4((world, 1),
+// lotRows[k])). False when the grid has no such layer.
+inline bool FloorVsRows(const Grid& g, int story, int kind, const float lotRows[3][4], float r0[4], float r1[4]) {
+    const auto it = g.rows.find({story, kind});
+    if (it == g.rows.end() || !g.w || !g.h) return false;
+    const float d = static_cast<float>(g.d), w = static_cast<float>(g.w), h = static_cast<float>(g.h);
+    for (int j = 0; j < 4; j++) r0[j] = lotRows[0][j] * d / w, r1[j] = lotRows[2][j] * d / h;
+    r1[3] += static_cast<float>(it->second) / h;
+    return true;
+}
+
 // The grid texture as Scatter leaves it (rgba, w x h): each point's atlas rgb x its ready weight, and that weight
 inline void FillCpu(const Grid& g, const std::vector<float>& atlas, const std::vector<float>& ready, std::vector<float>& grid) {
     grid.assign(static_cast<size_t>(g.w) * g.h * 4, 0.0f);
