@@ -39,7 +39,7 @@ Apex Radiance's test harness or to diagnostics.
 | 0007 | `client.ts3TextureKeepAliveSec`: hooks the game's ResourceCache trim | apex-only (The Sims 3) | not present | none |
 | 0008 | `client.freeIdleBufferCopiesSec`: free a static vertex or index buffer's client copy after N s without a lock | upstream (with 0003) | not present | `fix/free-idle-client-copies` |
 | 0009 | `client.freeIdleManagedCopiesMs`: 0003's threshold in milliseconds | upstream (with 0003) | not present | `fix/free-idle-client-copies` |
-| 0010 | render target 0 is the implicit swapchain's back buffer 0 object, as in d3d9 | upstream (with 0016) | not fixed (`LinkBackBuffer` place-holder) | `fix/render-target-0-is-back-buffer-0` |
+| 0010 | render target 0 is the implicit swapchain's back buffer 0 object, as in d3d9 | upstream (with 0016; its server hunks are also pull request 173) | not fixed (`LinkBackBuffer` place-holder) | `fix/render-target-0-is-back-buffer-0` |
 | 0011 | `SetRenderTarget(0)`, `Reset` and `ResetEx` reset the client's viewport and scissor rect | upstream | not fixed (sent-state invalidation only) | `fix/render-target-0-resets-viewport` |
 | 0012 | `SetFVF` and `SetVertexDeclaration` replace each other in the client's state | upstream | not fixed | `fix/setfvf-declaration-replace` |
 | 0013 | idle copy fetch fixes for 0003 and 0008 | upstream (with 0003) | not present | `fix/free-idle-client-copies` |
@@ -302,3 +302,46 @@ the same version. The options are documented in bridge/bridge.conf.
 
 Measurement: 2026-11-17, release builds of the branch, values read with `GetProcessMemoryInfo` and a `VirtualQuery`
 walk after the idle presents. After the relock the fetched copies are back (164.2 MiB private), as expected.
+
+### fix/reset-losable-leak
+
+Pull request 173 (upstream), also folded into pull request 168 so that 168 is safe on its own. Apex Radiance patch
+0010 carries the same server change (pull request 106 in this repository).
+
+Title: `bridge: hold no server reference on back buffers the client only unlinks`
+
+```text
+Through the bridge on a DXVK server, `IDirect3DDevice9::Reset` fails with
+`Device reset failed because device still has alive losable resources: Device not reset. Remaining resources: 1`
+and the device stays lost, when the game uses `BackBufferCount` 2 or more, or calls `GetRenderTarget` while a back
+buffer other than back buffer 0 is bound. The client is not told (the Reset answer is optional), so the next calls
+fail with `D3DERR_DEVICELOST`.
+
+## Cause
+
+The server handlers `IDirect3DSwapChain9_GetBackBuffer` and `IDirect3DDevice9Ex_GetRenderTarget` store the surface the
+D3D9 call returns and keep its reference. The client never destroys a swapchain back buffer: it only unlinks it
+(`Bridge_UnlinkResource`), so nothing releases that reference. DXVK's Reset destroys the back buffers before it counts
+losable resources, and a back buffer with a public reference stays alive.
+
+Back buffer 0 escapes by accident: the implicit render target place-holder is linked to it (`LinkBackBuffer`), and the
+place-holder's destroy (`safeDestroy`) releases references until none is left. Back buffers 1 and later, and the back
+buffers of additional swapchains, are never released.
+
+## Fix
+
+Both handlers map the handle without holding a reference. The objects stay alive through their owners: the swapchain
+for a back buffer, and the client's surface or texture for any other render target, whose destroy still releases its
+own references.
+
+## Testing
+
+A 32-bit test app through the bridge pair, server on DXVK 3.1.1 (`server.useVanillaDxvk`): create device, Present, Reset.
+
+| Case | main | This change |
+|---|---|---|
+| `BackBufferCount` 2, nothing created | Reset fails, 1 resource | OK |
+| `BackBufferCount` 2, `SetRenderTarget(0, back buffer 1)` + `GetRenderTarget` | Reset fails (also with only the GetBackBuffer half of the fix) | OK |
+| `BackBufferCount` 1, 2, 3: GetBackBuffer, GetSwapChain + GetBackBuffer, render target texture draws, GetRenderTargetData, bound INTZ depth texture, Reset after each | - | all Resets OK, no losable warning |
+| Server on system Direct3D 9 | - | Resets OK |
+```
