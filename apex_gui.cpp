@@ -2117,6 +2117,7 @@ void DevProfilerTab() {
     inspect(Performance::kSceneBudgetName, "Objects spread across frames", "Inspect pending work and object lifetime checks", "DevSceneObjects");
     inspect(Performance::kFastTextureName, "Texture compression and processor cores", "Compare texture output and processor worker use", "DevTextures");
     inspect(Performance::kFastCacheName, "Compressed game data", "Verify decompressed data matches the original", "DevCompression");
+    inspect("AsyncCompositor", "Sim textures through the bridge", "Count texture tiles read back without waiting", "DevAsyncCompositor");
 }
 
 void DevDebugViewsTab() {

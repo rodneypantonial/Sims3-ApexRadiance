@@ -161,9 +161,68 @@ a started record found after an unstarted one, or a ticket error.
 Checks for the test arms: tile bytes hashed in the sync and G arms must match; CAS "busy" must go idle; count tiles per
 second and frames a Sim waits for its textures.
 
+## 8. Implementation (development builds, not run in game)
+
+Code: `features/compositor_async.h` (the decisions, no game or Direct3D types), `features/compositor_readback.cpp` (the
+hooks and the bridge calls), feature `AsyncCompositor` in `patches/performance_patches.cpp` (development builds only).
+
+| Setting (`[patches.AsyncCompositor]`) | Default | Meaning |
+|---|---|---|
+| `enabled` | true | The feature itself; it does nothing while `mode` is 0 and `tileHashLog` is off |
+| `mode` | 0 | 0 = the game's read-back; 1 = one tile per frame through the bridge (option H); 2 = several tiles in flight (option G) |
+| `tileHashLog` | false | Logs `[AsyncCompositor] tile <w>x<h> at <x>,<y> hash <fnv-1a 64>` for every tile as state 3 is about to read it (the tile's rectangle of the locked staging texture, `job+0x0C` bits, `job+0x10` pitch, `job+0x5C` rectangle) |
+
+Hook sites, read again in the disassembly before use [verified, capstone on the binary above]:
+
+| Site | Bytes | Finding |
+|---|---|---|
+| `0x5FDC8A` | `E8 51 E0 FF FF` -> `0x5FBCE0` | `test eax, eax; jne 0x5FDC62` returns eax unchanged, before the two locks: a 2 leaves `job+0x00..0x08` and both rectangles set and nothing locked |
+| `0x5FDFFF` | `E8 1C F4 FF FF` -> `0x5FD420` | The dispatcher stores state 4 after the call whatever it returns, so a lost tile cannot be sent back to state 2 by writing `+0x74`. The hook renders the tile again itself (`0x5FDDE0`, the whole of state 2, synchronous) and then lets state 3 run |
+| `0x6082F8` | `E8 F3 5B FF FF` -> `0x5FDEF0` | ecx = builder (`[record]`), the argument = `record+4`; results as in section 5 |
+| `0x5FCAD0` | `56 8B F1 83 7E 1C 00 74 1C E8` | thiscall, no arguments, plain `ret`; 4 with `+0x94` set when the builder is invalid, done or has no tiles, otherwise a tail jump to the setup `0x5FC9D0` |
+| `0x5FBCE0` | | Source = `[[rt]+0x24]` of the render target object from `0x617500`, destination = level 0 of the staging texture (`0x6194B0`), device vtable `+0x80` (GetRenderTargetData). The hook does not resolve these itself: it lets the function run and answers its GetRenderTargetData in Apex's detour (the read-back filter) with the bridge request |
+
+How the plan of section 7 was built:
+
+- Read-back (`0x5FDC8A`): the bridge request is issued from inside the game's own call; refused (no slot, mode off in
+  the bridge, tile larger than a slot) means the game's copy runs as before. In mode 2 a refused tile is not deferred
+  at all, so a builder behind the head completes it in the same rotation step.
+- State 3 (`0x5FDFFF`): ready -> `0x5FDBF0` again with the copy skipped, then the game's state 3. Not ready (a
+  synchronous build, or the head waited more than 250 ms) -> up to 4 ms of polling, then cancel and render again.
+- Queue (`0x6082F8`): as section 7. The deque is walked from `[queue+8]` on every call (at most 256 records); entries
+  whose builder left the queue are cancelled without touching the builder. Work behind the head is one piece per call
+  (start one record, or step one builder until it is between tiles), then 0.
+- Fallback to mode 1 for the rest of the session: a started record behind an unstarted one, a head that is not the
+  first record, a device reset with tiles in flight, a ticket the bridge fails or no longer knows, a step of a builder
+  behind the head returning 3, or more than 16 steps without leaving states 3 to 7. Logged once as
+  `[AsyncCompositor] Rotation off, one tile per frame from here (<reason>)`.
+- The bridge path needs the queue layout above: Steam 1.67.2 with the bytes at `0x6079D0` and `0x5FCAD0` checked at
+  start. Elsewhere, and without the bridge's exports, modes 1 and 2 are the event-query deferral of 2025-10-05.
+- Counters (Developer page, "Sim textures through the bridge", and a log line about every 10 s while tiles are issued):
+  tiles in flight and the most at once, issued, ready, completed, rendered again, waits, waited out, dropped, refused,
+  records started and steps behind the head, fallbacks with the last reason.
+
+Tests:
+
+- `tools/compositor_async_test` (Smoke suite): the production header over a model of the queue (sorted records, the
+  builder state machine with both lock spans, one shared render target, a four-slot bridge). Checks per run: every tile
+  holds its own pixels, no builder behind the head holds a lock after a hook call, the loop never receives the result
+  of a builder behind the head, at most four tiles in flight, no ticket leaks. Cases: off, one tile, rotation, reset,
+  failed and unknown tickets, broken order, a bridge that never answers or refuses, cancels and synchronous builds, and
+  3000 random runs. In the model 18 tiles take 37 frames with one tile per frame and 14 with rotation (bridge latency
+  2 frames); not a measurement of the game.
+- In-game job `tools/ingame_runner/jobs/compositor-async.json` (arms game, h, g) and
+  `tools/compositor_async_test/compare_tiles.ps1` for the tile hashes of its loads. Not run. It needs a development
+  build and a bridge pair with patches 0016 and 0017.
+
+Not verified: everything at run time. In particular that a second render of a tile (state 2 run twice) gives the same
+pixels, that tiles are at most 256 KB (one bridge slot), and that the arms of the job see the same Sims.
+
 ## Open questions
 
-- Meaning of states 5 and 6 (`0x5FD210`, `0x5FBEF0`) and whether either takes a lock.
+- States 5 to 7: `0x5FD210` locks a mip level of the builder's own output texture (`0x5FC230` -> `0x618DF0`), unlocked
+  through `0x5FC740`; none of `0x5FD210`, `0x5FBEF0`, `0x5FD820` or `0x5FD420` reaches the render target manager
+  (`0x616FC0`, `0x617500`) or a read-back [verified by a call scan one level deep]. What each step computes is open.
 - Budget unit of `+0x18` and the exact role of byte `+0x15`.
 - Whether the state-1 path (`0x610660`) does a CPU read-back for some formats; if so it is a second site for G.
 - Whether the bridge executes the async read-back in command order relative to later draws to the same RT (required).

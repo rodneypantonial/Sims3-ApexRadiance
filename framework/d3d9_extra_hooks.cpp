@@ -336,7 +336,7 @@ bool EnsureTargetHooks(IDirect3DDevice9* dev) {
     return true;
 }
 
-void SetReadbackFilter(ReadbackFilter fn) { g_readbackFilter.store(fn); }
+ReadbackFilter SetReadbackFilter(ReadbackFilter fn) { return g_readbackFilter.exchange(fn); }
 void SetTargetSubstitution(SurfaceAccess access, TargetReport report) {
     g_access.store(access);
     g_targetReport.store(report);

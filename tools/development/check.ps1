@@ -40,5 +40,7 @@ try {
 # Sims3Performance.ini: the [Patches] values Apex reads and the two lines it changes on the player's click
 & (Join-Path $repo 'tools/s3pp_settings_test/run.ps1') -OutDir (Join-Path $out 's3pp_settings') | Tee-Object -FilePath (Join-Path $out 's3pp_settings.txt')
 & (Join-Path $repo 'tools/settings_migration_test/run.ps1') -OutDir (Join-Path $out 'settings_migration') | Tee-Object -FilePath (Join-Path $out 'settings_migration.txt')
+# Texture tiles through the bridge's asynchronous read-back: the queue decisions over a model of the game's queue
+& (Join-Path $repo 'tools/compositor_async_test/run.ps1') -OutDir (Join-Path $out 'compositor_async') | Tee-Object -FilePath (Join-Path $out 'compositor_async.txt')
 & (Join-Path $repo 'tools/shader_refusals_test/run.ps1') -OutDir (Join-Path $out 'shader_refusals') | Tee-Object -FilePath (Join-Path $out 'shader_refusals.txt')
 Write-Output "CPU $Suite suite passed. Gameplay and D3D9/DXVK validation remain separate."

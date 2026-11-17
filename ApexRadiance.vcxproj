@@ -299,6 +299,7 @@
     <ClInclude Include="features\fast_refpack.h" />
     <ClInclude Include="features\cas_tri_sort.h" />
     <ClInclude Include="features\fast_cas.h" />
+    <ClInclude Include="features\compositor_async.h" />
     <ClInclude Include="features\compositor_readback.h" />
     <ClInclude Include="features\pick_readback.h" />
     <ClInclude Include="features\fast_crc.h" />

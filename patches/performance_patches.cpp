@@ -397,7 +397,6 @@ class FastCasSortPatch : public ApexPatch {
 
     bool Uninstall() override {
         if (!isEnabled) return true;
-        CompositorReadback::Stop();
         FastCas::Stop();
         isEnabled = false;
         lastError.clear();
@@ -405,11 +404,44 @@ class FastCasSortPatch : public ApexPatch {
     }
 
     void RenderCustomUI() override {} // the Performance card draws the row
-    void RenderDeveloperUI() override {
-        FastCas::RenderDeveloperUI();
-        CompositorReadback::RenderDeveloperUI();
-    }
+    void RenderDeveloperUI() override { FastCas::RenderDeveloperUI(); }
 };
+
+#ifndef APEX_NO_DEV_TOOLS
+// Development builds: texture tiles read back through the RTX Remix bridge's asynchronous read-back
+// (features/compositor_readback.h, docs/features/compositor-async-re.md). Not run in game yet.
+class AsyncCompositorPatch : public ApexPatch {
+  public:
+    AsyncCompositorPatch() : ApexPatch("AsyncCompositor", nullptr) {
+        RegisterIntSetting(&mode_, "mode", 0, 0, 2, "Texture tiles through the bridge (0 off, 1 one tile per frame, 2 several in flight)");
+        RegisterBoolSetting(&tileHashLog_, "tileHashLog", false, "Log a hash of every texture tile");
+    }
+
+    bool Install() override {
+        if (isEnabled) return true;
+        lastError.clear();
+        std::string error;
+        if ((mode_ != 0 || tileHashLog_) && !CompositorReadback::Start(mode_, tileHashLog_, &error)) return Fail(error);
+        isEnabled = true;
+        return true;
+    }
+
+    bool Uninstall() override {
+        if (!isEnabled) return true;
+        CompositorReadback::Stop();
+        isEnabled = false;
+        lastError.clear();
+        return true;
+    }
+
+    void RenderCustomUI() override {} // no menu option: the settings file and the Developer page
+    void RenderDeveloperUI() override { CompositorReadback::RenderDeveloperUI(); }
+
+  private:
+    int mode_ = 0;
+    bool tileHashLog_ = false;
+};
+#endif
 
 class FastMemoryPatch : public ApexPatch {
   public:
@@ -847,6 +879,22 @@ APEX_REGISTER_FEATURE(FastCasSortPatch,
                                             "and the same stable sort.",
                                             "The first 16 calls of each session also run the game's function and compare the indices; a difference turns the feature off."},
                        .gameCodeGroup = "FastCasSort"});
+
+#ifndef APEX_NO_DEV_TOOLS
+APEX_REGISTER_FEATURE(AsyncCompositorPatch,
+                      {.displayName = "Sim Textures Through The Bridge (developer)",
+                       .description = "Development builds, under the RTX Remix bridge: the game's texture builder hands each finished tile to the bridge and goes on, "
+                                      "instead of waiting for the copy. Off until its mode is set in the settings file. Part of " APEX_PRODUCT_NAME ". Credits: @loinyx",
+                       .category = "Experimental",
+                       .experimental = true,
+                       .enabledByDefault = true,
+                       .supportedVersions = VERSION_STEAM,
+                       .technicalDetails = {"mode 1: the tile's GetRenderTargetData (0x5FDC8A) becomes an asynchronous read-back of the bridge; the compositor queue stops for "
+                                            "the frame and the tile is used once its bytes arrived.",
+                                            "mode 2: while the head of the queue waits, the records behind it are started in queue order and stepped, up to four tiles "
+                                            "in flight. An order, reset or ticket error returns to mode 1; a lost tile is rendered again."},
+                       .gameCodeGroup = "CompositorReadback"});
+#endif
 
 APEX_REGISTER_FEATURE(FastMemoryPatch,
                       {.displayName = "Faster Memory Handling",

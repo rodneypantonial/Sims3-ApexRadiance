@@ -19,12 +19,17 @@
 //     find the copy done, then FUN_005fd420 as before. A 3 or 4 from FUN_005fdbf0 is returned as the game would have.
 // The bytes read are those the game reads; each tile only finishes one or more frames later. Calls from elsewhere (the
 // synchronous loop at 0x005FE0FB, state 1) are never deferred, and a deferred tile is always completed in state 3.
+//
+// Under the RTX Remix bridge with asynchronous read-backs (patch 0017) the copy itself goes to the bridge instead
+// (compositor_async.h): mode 1 keeps one tile per frame, mode 2 also starts and steps the records behind a waiting head,
+// up to four tiles in flight. Development builds only, [patches.AsyncCompositor] mode, off by default; not run in game yet.
 #include <cstdint>
 #include <string>
 
 namespace CompositorReadback {
 
-bool Start(std::string* error);
+// mode: 0 the game's read-back (hooks pass through; for tileHashLog), 1 one tile per frame, 2 several tiles in flight
+bool Start(int mode, bool tileHashLog, std::string* error);
 void Stop();
 bool Running();
 
@@ -37,6 +42,8 @@ struct Stats {
     uint64_t gamePath = 0;   // state-2 readbacks left to the game (not from the queue, query unavailable)
     double resumeMs = 0.0, resumeMaxMs = 0.0; // the deferred lock (FUN_005fdbf0 again) in state 3
     double state2Ms = 0.0;   // state-2 calls that were deferred (render + readback, no lock)
+    uint64_t refused = 0;    // tiles the bridge did not take (the game's copy ran)
+    uint64_t hashed = 0;     // tiles whose hash was logged
 };
 Stats GetStats();
 std::string StatusText();

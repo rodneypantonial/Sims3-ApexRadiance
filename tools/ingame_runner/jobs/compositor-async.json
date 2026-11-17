@@ -1,0 +1,91 @@
+{
+  "id": "compositor-async",
+  "description": "Sim textures through the RTX Remix bridge's asynchronous read-back (development builds, [patches.AsyncCompositor]): Create a Sim, then populated lots with outfit changes, once with the game's read-back (game), once with one tile per frame (h) and once with several tiles in flight (g). Needs a development build and a bridge pair with patches 0016 (render target 0 is no device reference) and 0017 (asynchronous read-backs), client.asyncReadback = True in both bridge.conf files; without them h and g fail on their bridge line. Pass: every arm logs its mode, h and g log the bridge line, g logs no fallback. Afterwards compare the tiles of the three loads: tools/compositor_async_test/compare_tiles.ps1 -RunDir <the run's output folder>; the arms are expected to log the same tile hashes (not yet confirmed in game: Sims that happen to differ between loads show up as differences). Read also: the counter line of h and g (issued, ready, rendered again, in flight), frames over 50 ms per minute, CAS/TextureCompositor in the service table.",
+  "save": "ApexTest-Town",
+  "toml": {
+    "patches.AsyncCompositor": {
+      "enabled": true,
+      "tileHashLog": true
+    }
+  },
+  "expect": [
+    "\\[AsyncCompositor\\] tile \\d+x\\d+ at \\d+,\\d+ hash [0-9a-f]{16}"
+  ],
+  "variants": {
+    "game": {
+      "toml": {
+        "patches.AsyncCompositor": {
+          "mode": 0
+        }
+      },
+      "expect": [
+        "\\[AsyncCompositor\\] On: mode 0 "
+      ],
+      "fail": [
+        "\\[AsyncCompositor\\] Texture tiles are read back through the RTX Remix bridge"
+      ]
+    },
+    "h": {
+      "toml": {
+        "patches.AsyncCompositor": {
+          "mode": 1
+        }
+      },
+      "expect": [
+        "\\[AsyncCompositor\\] On: mode 1 ",
+        "\\[AsyncCompositor\\] Texture tiles are read back through the RTX Remix bridge",
+        "\\[AsyncCompositor\\] \\d+ tiles issued"
+      ]
+    },
+    "g": {
+      "toml": {
+        "patches.AsyncCompositor": {
+          "mode": 2
+        }
+      },
+      "expect": [
+        "\\[AsyncCompositor\\] On: mode 2 ",
+        "\\[AsyncCompositor\\] Texture tiles are read back through the RTX Remix bridge",
+        "\\[AsyncCompositor\\] \\d+ tiles issued"
+      ],
+      "fail": [
+        "\\[AsyncCompositor\\] Rotation off"
+      ]
+    }
+  },
+  "order": ["game", "h", "g"],
+  "steps": [
+    {
+      "do": "speed",
+      "speed": "normal"
+    },
+    {
+      "do": "mode",
+      "mode": "cas",
+      "seconds": 20
+    },
+    {
+      "do": "mode",
+      "mode": "live",
+      "seconds": 5
+    },
+    {
+      "do": "camera_jumps",
+      "order": "populated",
+      "lots": 6,
+      "dwellS": 5,
+      "outfits": 2
+    },
+    {
+      "do": "wait",
+      "minutes": 8,
+      "measure": true,
+      "until": {
+        "jumps": 40
+      }
+    },
+    {
+      "do": "stop_repros"
+    }
+  ]
+}
