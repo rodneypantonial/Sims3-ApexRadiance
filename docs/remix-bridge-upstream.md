@@ -57,13 +57,18 @@ counters of the patches.
 Each branch is one commit on upstream `main` (`afb0252`), pushed to a contributor fork of dxvk-remix. The
 commits carry no credit line yet: the first pull request adds the author to `dxvk_imgui_about.cpp`, the others leave
 it out to avoid conflicts. Build: the six branches merged together build the release x64 server and x86 client with
-VS 2022 and meson 1.12, and each branch alone builds the x86 client. No game test has run on these branches; the
-same changes ship in the Apex Radiance bridge package on the pinned commit. `fix/free-idle-client-copies` alone builds the
+VS 2022 and meson 1.12, and each branch alone builds the x86 client. Five branches add a bridge app test to
+`bridge/test/rtx/unit/` (an x86 D3D9 app that `test_remix_api_bridge_app.py` runs against the client and server).
+Each test passes on its own branch against a server on system d3d9, and all five pass on the merged build against a
+server on vanilla DXVK. The tests do not call `Reset`, because a server on system d3d9 fails `Reset` on upstream
+`main` too (it still holds the back buffer references). The five branches change the same list line in
+`bridge/test/rtx/unit/meson.build`, so later cherry-picks need that one line merged. No game test has run on these
+branches; the same changes ship in the Apex Radiance bridge package on the pinned commit. `fix/free-idle-client-copies` alone builds the
 release x64 server and x86 client.
 
 ### fix/get-render-target-notfound
 
-Title: `bridge: return D3DERR_NOTFOUND from GetRenderTarget and GetDepthStencilSurface on an empty slot`
+Title: `bridge: return D3DERR_NOTFOUND for an empty render target or depth-stencil slot`
 
 ```text
 ## Summary
@@ -78,6 +83,9 @@ Both calls now return D3DERR_NOTFOUND with the output pointer set to NULL.
 
 ## Testing
 - Built the bridge (x64 server, x86 client, release).
+- New bridge app test test_render_target_notfound_device: both calls return
+  D3DERR_NOTFOUND and clear the output pointer on an empty slot, and
+  GetDepthStencilSurface returns the surface that was set.
 - The Sims 3 under the bridge no longer crashes in the clear path; the same
   change has shipped in the Apex Radiance bridge package.
 ```
@@ -101,6 +109,9 @@ WriteFile gets the bytes-written argument it needs when no OVERLAPPED is passed.
 - Built the bridge (x64 server, x86 client, release).
 - A client log line longer than 4 KB is written whole instead of ending the
   process.
+- No bridge app test: a D3D9 app has no call that makes the client log a line
+  of a chosen length. To reproduce on main, log any line of 4095 characters
+  or more in the client, for example Logger::info(std::string(5000, 'x')).
 ```
 
 ### fix/render-target-0-is-back-buffer-0
@@ -131,10 +142,10 @@ count right, the final Release also destroys the device.
 
 ## Testing
 - Built the bridge (x64 server, x86 client, release).
-- GetRenderTarget(0) and GetBackBuffer(0, 0) return the same pointer; a
-  post-processing injector that compares them draws again.
-- A device survives AddRef/Release directly after CreateDevice and its
-  GetBackBuffer still succeeds (covered by a unit test in our tree).
+- New bridge app test test_implicit_render_target_device: GetRenderTarget(0)
+  and GetBackBuffer(0, 0) return the same pointer, AddRef/Release on a new
+  device return 2 and 1, and the last Release returns 0.
+- A post-processing injector that compares the two pointers draws again.
 ```
 
 ### fix/render-target-0-resets-viewport
@@ -152,12 +163,15 @@ target and restores it afterwards put a stale viewport back, and the rest of
 the game's pass drew with it.
 
 The client's copies of the viewport and the scissor rect now follow the new
-render target 0, and the back buffer after Reset or ResetEx.
+render target 0, and the back buffer after CreateDevice, Reset or ResetEx.
 
 ## Testing
 - Built the bridge (x64 server, x86 client, release).
-- GetViewport after SetRenderTarget(0, smaller target) returns the target's
-  size; a mid-frame post-processing pass no longer restores a stale viewport.
+- New bridge app test test_render_target_viewport_device: GetViewport and
+  GetScissorRect return the full target on a new device and after
+  SetRenderTarget(0) to a smaller target and back. The test does not call
+  Reset, which fails on a server that runs on system d3d9.
+- A mid-frame post-processing pass no longer restores a stale viewport.
 ```
 
 ### fix/setfvf-declaration-replace
@@ -177,15 +191,19 @@ draws with the wrong vertex layout.
 SetVertexDeclaration now sets the client's FVF to 0 and SetFVF clears the
 client's declaration. After SetFVF, GetVertexDeclaration returns no
 declaration, where d3d9 returns one built from the FVF; restoring the FVF gives
-the same result. The FVF moves into the client's State so a state block
-captures and applies it with the declaration, as d3d9 does. The sent-state
-cache already treated the two as replacing each other.
+the same result. SetFVF(0) leaves the client's state as it is, because d3d9
+ignores an FVF of 0, so a caller that restores a saved FVF of 0 after its
+declaration keeps the declaration. The FVF moves into the client's State so a
+state block captures and applies it with the declaration, as d3d9 does. The
+sent-state cache already treated the two as replacing each other.
 
 ## Testing
 - Built the bridge (x64 server, x86 client, release).
-- GetFVF after SetVertexDeclaration returns 0; GetVertexDeclaration after
-  SetFVF returns NULL; save/restore of the vertex input around a mid-frame pass
-  keeps the game's fixed-function UI correct.
+- New bridge app test test_vertex_format_device: GetFVF returns 0 after
+  SetVertexDeclaration, the declaration is gone after SetFVF and stays after
+  SetFVF(0), and a state block restores the FVF and the declaration together.
+- Save/restore of the vertex input around a mid-frame pass keeps the game's
+  fixed-function UI correct.
 ```
 
 ### fix/surface-copy-zeroed
@@ -194,14 +212,22 @@ Title: `bridge: zero-initialize a new surface shadow copy`
 
 ```text
 ## Summary
-A new d3d9 or DXVK texture starts zeroed. The client allocated the shadow copy
-of a lockable surface with new uint8_t[size], which leaves it uninitialized, so
-a game that writes part of a new level and uploads the whole level sent heap
-garbage to the server. The Sims 3 does this for its lot terrain overlay maps,
-and some lots drew their ground black on some loads.
+DXVK clears a new texture, and d3d9 drivers hand out zeroed texture memory in
+practice. The client allocated the shadow copy of a lockable surface with
+new uint8_t[size], which leaves it uninitialized, so a game that locks a new
+level, writes part of it and unlocks sent heap garbage to the server. The
+Sims 3 does this for its lot terrain overlay maps, and some lots drew their
+ground black on some loads.
+
+The copy is now value-initialized, which costs one pass over it at the
+surface's first lock. The shared heap path (useSharedHeap, off by default) is
+not changed.
 
 ## Testing
 - Built the bridge (x64 server, x86 client, release).
+- New bridge app test test_surface_shadow_device: the first lock of 16 new
+  texture levels returns zeroed memory, although each earlier texture filled
+  its level before it was released. The test fails on main.
 - The affected lots draw their ground correctly on every load.
 ```
 
@@ -223,8 +249,12 @@ been locked for a while:
 - client.freeIdleBufferCopiesSec for static vertex and index buffers of
   64 KB to 4 MB.
 
+A copy is freed only when it is no larger than half of serverChannelMemSize,
+because the server sends it back as one blob through that channel.
+
 Freeable copies of 64 KB and more come from VirtualAlloc, so freeing one
-returns its address space. Idle copies are freed during Present. The next
+returns its address space. Idle copies are freed at the start of the swap
+chain's Present, which the device's Present and PresentEx call. The next
 lock fetches the copy back from the server: a texture level through the
 existing IDirect3DSurface9_LockRect readback, a buffer through a Lock with
 the new ReturnData flag. If the fetch fails, the lock fails, so that Unlock
@@ -247,6 +277,9 @@ the same version. The options are documented in bridge/bridge.conf.
 
   All 160 relocked objects hold the bytes written before the copies were
   freed, and no CRC mismatch is logged.
+- The same app with one D3DCREATE_MULTITHREADED device, where a second
+  thread relocks the objects in turn while the main thread presents for 12 s:
+  no wrong object in 128 relock rounds or in the final check.
 - The same change has shipped in the Apex Radiance bridge package.
 ```
 
