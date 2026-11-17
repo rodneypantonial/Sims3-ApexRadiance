@@ -250,6 +250,10 @@ not changed.
 
 ### fix/free-idle-client-copies
 
+Pull request 172 (upstream). Amended after the review (one commit, `3a789e3a`): a Present frees only its own
+device's copies, the readback limit comes from the server's data ring with room for a wrap, and write-only buffers
+keep their copy. Apex Radiance patches 0003, 0008 and 0013 need the same fixes.
+
 Title: `bridge: free idle client copies of MANAGED textures and static buffers`
 
 ```text
@@ -264,14 +268,21 @@ been locked for a while:
 - client.freeIdleManagedCopiesSec (or client.freeIdleManagedCopiesMs) for
   MANAGED texture levels.
 - client.freeIdleBufferCopiesSec for static vertex and index buffers of
-  64 KB to 4 MB.
+  64 KB to 4 MB. Write-only (D3DUSAGE_WRITEONLY) buffers keep their copy,
+  since the server reads a freed copy back with D3DLOCK_READONLY.
 
-A copy is freed only when it is no larger than half of serverChannelMemSize,
-because the server sends it back as one blob through that channel.
+A copy is freed only when the server can send it back in one response. The
+server exits when a response does not fit its data ring, and a blob that
+wraps at the ring's end can skip up to its own size, so a copy may take at
+most half of the data ring (serverChannelMemSize minus the command queue)
+after 8 words for metadata: about 16 MB with the default 32 MB channel.
 
 Freeable copies of 64 KB and more come from VirtualAlloc, so freeing one
 returns its address space. Idle copies are freed at the start of the swap
-chain's Present, which the device's Present and PresentEx call. The next
+chain's Present, which the device's Present and PresentEx call, and only
+for that device's own resources: devices created without
+D3DCREATE_MULTITHREADED share no lock, so another device may be inside a
+lock of its own resource at that moment. The next
 lock fetches the copy back from the server: a texture level through the
 existing IDirect3DSurface9_LockRect readback, a buffer through a Lock with
 the new ReturnData flag. If the fetch fails, the lock fails, so that Unlock
@@ -297,11 +308,28 @@ the same version. The options are documented in bridge/bridge.conf.
 - The same app with one D3DCREATE_MULTITHREADED device, where a second
   thread relocks the objects in turn while the main thread presents for 12 s:
   no wrong object in 128 relock rounds or in the final check.
+- After the review fixes (x86 client, x64 server, release; system D3D9 and
+  vanilla DXVK servers; idle time 200 ms for textures, 1 s for buffers):
+  - One device with 96 textures, 64 readable and 16 write-only static
+    buffers, a 2048x2047 and a 2048x2048 A8R8G8B8 texture: everything but the
+    write-only buffers and the 2048x2048 texture is freed (private bytes kept
+    over base: 32.3 MiB on D3D9, 34.6 MiB on DXVK, expected 32 MiB); the
+    2048x2047 texture, just under the limit, is fetched back 12 times; every
+    byte of every object checks out, and the write-only buffers lock fine.
+  - Two devices without D3DCREATE_MULTITHREADED on two threads (calls
+    serialized by the app): while only device A presents, device B keeps all
+    its copies (183.7 MiB before and after); B's own presents then free
+    160 MiB; every byte checks out. The previous revision of this PR freed
+    89 MiB of B's copies during A's presents.
+  - The same two devices with unserialized calls pass on DXVK; on the system
+    D3D9 server, concurrent CreateDevice calls from the two threads already
+    fail with "no response from server", which is outside this change.
 - The same change has shipped in the Apex Radiance bridge package.
 ```
 
-Measurement: 2026-11-17, release builds of the branch, values read with `GetProcessMemoryInfo` and a `VirtualQuery`
-walk after the idle presents. After the relock the fetched copies are back (164.2 MiB private), as expected.
+Measurement: 2026-11-17, release builds of the branch, values read with `GetProcessMemoryInfo` after the idle
+presents. The system D3D9 server cannot create a device on a hidden desktop, so its runs used a window off screen;
+the vanilla DXVK runs used a hidden desktop.
 
 ### fix/reset-losable-leak
 
