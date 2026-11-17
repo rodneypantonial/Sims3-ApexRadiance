@@ -8964,6 +8964,7 @@ template <typename DrawFn> bool DrawIndoorObject(IDirect3DDevice9* dev, DrawFn d
     // the basis light holds per pixel (so a lamp never counts twice and its light stays smooth across the object). The
     // vertex lights are zeroed as before: the game moves overflow lamps there, and the basis maps hold those too.
     float rig[8][4] = {}, unlit[4][4] = {}, oldVl[4][4] = {};
+    bool zeroVl = false;
     // shortcut: stairs and window copies keep strength 1, raise them if a stair looks dark beside furniture
     const float zero[4][4] = {}, strength[4] = {TerrainLightingPolicy::FurnitureLampGain(g_night.load(std::memory_order_relaxed)), 0, 0, 0};
     if (SUCCEEDED(dev->GetPixelShaderConstantF(0, &rig[0][0], 8)))
@@ -8989,13 +8990,18 @@ template <typename DrawFn> bool DrawIndoorObject(IDirect3DDevice9* dev, DrawFn d
         if (p.indoor.sideConst >= 0) consts.Add(static_cast<UINT>(p.indoor.sideConst), side, 1); // 0: not set in a wall, read where it is
         consts.Set();
         if (vl >= 0) {
+            // (real-time GI S2-06 item 8b) the grid's light the rig write put in the vertex lights stays: the directional maps
+            // hold lamps only, so the grid adds (lamp share 0, as on the rig); the game's overflow lamps are zeroed as before
+            float bound[8][4] = {};
+            const bool grid = vl >= 4 && SUCCEEDED(dev->GetVertexShaderConstantF(static_cast<UINT>(vl - 4), &bound[0][0], 8)) &&
+                              RealtimeGI::GridVertexLights(RigTracker::CurrentRig(), bound);
             dev->GetVertexShaderConstantF(static_cast<UINT>(vl), &oldVl[0][0], 4);
-            SetVsConst(dev, static_cast<UINT>(vl), &zero[0][0], 4);
+            if (!grid) SetVsConst(dev, static_cast<UINT>(vl), &zero[0][0], 4), zeroVl = true;
         }
         SetPs(dev, p.ps);
         draw();
         SetPs(dev, original);
-        if (vl >= 0) SetVsConst(dev, static_cast<UINT>(vl), &oldVl[0][0], 4);
+        if (zeroVl) SetVsConst(dev, static_cast<UINT>(vl), &oldVl[0][0], 4);
         consts.Restore();
     }
     g_traceA = TraceA{lightMapPtr, reinterpret_cast<uintptr_t>(basis[0]), size[0], size[1]};

@@ -1183,12 +1183,12 @@ void OnPresent(IDirect3DDevice9* dev) {
     const uint64_t cap = Value(Counter::CapSolvesOnGiLots), sync = Value(Counter::SyncReadbacks), locks = Value(Counter::ResourceLocks),
                    diffs = Value(Counter::RedrawDiffs), faults = Value(Counter::ReadFaults), table = Value(Counter::LampTableDiffs);
     const std::string line = std::format("[RealtimeGI] Counters: frames={} backend={} draws={} deviceCalls={} lamps={} lots={} lampChanges={} "
-                                         "indirect={} atlasReady={} gridTexels={} indirectDraws={} wallDraws={} rigs={} rigDraws={} rigReads={} rigSkipped={}; must be 0: "
+                                         "indirect={} atlasReady={} gridTexels={} indirectDraws={} wallDraws={} rigs={} rigDraws={} rigReads={} rigSkipped={} indoorRigDraws={}; must be 0: "
                                          "capSolves={} syncReadbacks={} locks={} redrawDiffs={} readFaults={} lampTableDiffs={}",
                                          frames, kBackendNames[static_cast<int>(g_backend.load())], Value(Counter::Draws), Value(Counter::DeviceCalls),
                                          g_lamps.size(), g_giLots, Value(Counter::LampChanges), kIndirectNames[g_options.indirect], g_readyTexels,
                                          g_grid.points.size(), Value(Counter::IndirectDraws), Value(Counter::WallDraws), g_rigs.size(),
-                                         Value(Counter::RigDraws), Value(Counter::RigReads), Value(Counter::RigSkipped), cap, sync, locks, diffs, faults, table);
+                                         Value(Counter::RigDraws), Value(Counter::RigReads), Value(Counter::RigSkipped), Value(Counter::IndoorRigDraws), cap, sync, locks, diffs, faults, table);
     if (cap || sync || locks || diffs || faults || table) LOG_WARNING(line);
     else LOG_INFO(line);
     MeshLog();
@@ -1224,6 +1224,13 @@ void OnPresent(IDirect3DDevice9* dev) {
 void Add(Counter c, uint32_t n) { g_counters[static_cast<size_t>(c)].fetch_add(n, std::memory_order_relaxed); }
 uint64_t Value(Counter c) { return g_counters[static_cast<size_t>(c)].load(std::memory_order_relaxed); }
 bool Running() { return g_running.load(); }
+bool GridVertexLights(uintptr_t rig, const float bound[8][4]) {
+    if (!rig || !g_running.load() || !g_options.indirect || g_rigOff) return false;
+    const auto it = g_rigs.find(rig);
+    if (it == g_rigs.end() || !it->second.wrote || !GiIndirect::VertexLightsAreGrid(bound, it->second.written)) return false;
+    Add(Counter::IndoorRigDraws);
+    return true;
+}
 const std::vector<Lamp>& Lamps() { return g_lamps; }
 uint32_t LampSerial() { return g_serial; }
 const std::vector<Change>& Changes() { return g_changes; }

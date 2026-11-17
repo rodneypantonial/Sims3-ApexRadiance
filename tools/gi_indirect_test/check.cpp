@@ -337,6 +337,19 @@ void RigChecks() {
     Check(GiIndirect::RigSlotState(slots, slots) == GiIndirect::kRigOurs, "the last write: ours");
     Check(GiIndirect::RigSlotState(other, slots) == GiIndirect::kRigGame && GiIndirect::RigSlotState(slots, nullptr) == GiIndirect::kRigGame,
           "anything else (overflow lamps, the fill light's moved slot): the game's, left alone");
+    // (item 8b) indoor furniture on Apex's indoor-object shader keeps exactly a lit grid write, zeroes everything else
+    {
+        const float lit[3] = {0.2f, 0.1f, 0.05f}, dark[3] = {};
+        float w[8][4], wd[8][4];
+        GiIndirect::RigSlots(lit, w), GiIndirect::RigSlots(dark, wd);
+        Check(GiIndirect::VertexLightsAreGrid(w, w), "indoor object: the rig's lit grid write is kept");
+        Check(!GiIndirect::VertexLightsAreGrid(wd, wd) && !GiIndirect::VertexLightsAreGrid(zero, wd), "indoor object: an unlit write or cleared slots: zeroed");
+        float moved[8][4];
+        std::memcpy(moved, w, sizeof moved);
+        moved[3][0] = 0.5f; // (a game lamp's direction in one slot)
+        Check(!GiIndirect::VertexLightsAreGrid(moved, w) && !GiIndirect::VertexLightsAreGrid(w, nullptr) && !GiIndirect::VertexLightsAreGrid(other, slots),
+              "indoor object: overflow lamps, a changed slot or no write: zeroed as before");
+    }
     Check(GiIndirect::HalfToFloat(0x3C00) == 1.0f && GiIndirect::HalfToFloat(0xC000) == -2.0f && GiIndirect::HalfToFloat(0x0001) == std::ldexp(1.0f, -24) &&
               GiIndirect::HalfToFloat(0x7BFF) == 65504.0f && GiIndirect::HalfToFloat(0) == 0.0f,
           "fp16 decode of the probe read");
@@ -742,6 +755,53 @@ void PrecompChecks(const char* path, Gpu& gpu) {
     }
     std::printf("  InteriorWall vs_3_0 vertex shaders: %zu, %d take the wall uv copy, %d created natively\n", wallVs.size(), vsTaken, vsCreated);
     Check(!wallVs.empty() && vsTaken == static_cast<int>(wallVs.size()) && (vsCreated == vsTaken || !gpu.dev), "every InteriorWall vs_3_0 takes the wall uv copy");
+    // (S2-06 item 8b) Apex's indoor-object copies (PatchIndoorBasis, plain and with walls + side) of the rig-lit object shaders
+    // still read COLOR0 (the vertex lights the grid write fills) wherever the game's shader reads it
+    const auto readsColor0 = [](const std::vector<DWORD>& code) {
+        ID3DBlob* d = nullptr;
+        if (FAILED(D3DDisassemble(code.data(), code.size() * 4, 0, nullptr, &d)) || !d) return false;
+        const std::string s(static_cast<const char*>(d->GetBufferPointer()), d->GetBufferSize());
+        d->Release();
+        std::string reg;
+        size_t at = 0, uses = 0;
+        for (size_t e; at < s.size(); at = e + 1) {
+            e = s.find('\n', at);
+            if (e == std::string::npos) e = s.size();
+            const std::string line = s.substr(at, e - at);
+            const size_t k = line.find_first_not_of(' ');
+            if (k == std::string::npos || line[k] == '/') continue;
+            if (line.compare(k, 9, "dcl_color") == 0 && (line[k + 9] == ' ' || line[k + 9] == '_')) {
+                if (const size_t v = line.find(" v", k); v != std::string::npos) reg = line.substr(v + 1, line.find_first_of(". ", v + 1) - v - 1);
+                continue;
+            }
+            if (reg.empty() || line.compare(k, 3, "dcl") == 0 || line.compare(k, 3, "def") == 0) continue;
+            for (size_t p = line.find(reg); p != std::string::npos; p = line.find(reg, p + 1))
+                uses += p + reg.size() >= line.size() || !std::isdigit(static_cast<unsigned char>(line[p + reg.size()]));
+        }
+        return uses > 0;
+    };
+    std::set<uint32_t> objPs;
+    for (const char* n : {"SingleObject", "InstancedObject", "Phong", "PhongAlpha", "Counters"})
+        for (const Tech& tc : techs)
+            if (tc.name == Fnv1Lower(n))
+                for (const auto& [vs, ps] : tc.passes)
+                    if (ps >= 1 && ps <= blobs.size() && !blobs[ps - 1].code.empty() && blobs[ps - 1].code[0] == 0xFFFF0300) objPs.insert(ps - 1);
+    int objTaken = 0, objColor = 0, objKept = 0;
+    for (uint32_t i : objPs) {
+        const bool color = readsColor0(blobs[i].code);
+        for (DWORD s = 0; s < 8; s++) {
+            std::vector<DWORD> a = blobs[i].code, b = blobs[i].code;
+            ShaderPatches::IndoorBasisPatch pa, pb;
+            if (!ShaderPatches::PatchIndoorBasis(a, s, pa)) continue;
+            objTaken++, objColor += color;
+            const bool sideOk = !ShaderPatches::PatchIndoorBasis(b, s, pb, true, true, true) || readsColor0(b);
+            objKept += color && readsColor0(a) && sideOk;
+            if (color && !(readsColor0(a) && sideOk)) std::printf("  indoor-object copy drops COLOR0: blob %u (s%lu)\n", i, s);
+            break;
+        }
+    }
+    std::printf("  indoor-object ps_3_0 (PatchIndoorBasis): %d take it, %d read COLOR0, %d copies keep reading it\n", objTaken, objColor, objKept);
+    Check(objColor > 0 && objKept == objColor, "every indoor-object copy keeps the vertex lights (COLOR0) of its game shader");
     Check(ps2 == ps2Refused, "every ps_2_0 shader refused, bytes unchanged");
     Check(unchanged == refusals, "every refusal leaves the bytes unchanged (indirect off: the same shaders)");
     for (const Kind& k : kinds) {

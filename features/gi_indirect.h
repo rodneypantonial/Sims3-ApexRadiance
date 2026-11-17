@@ -353,6 +353,16 @@ inline int RigSlotState(const float cur[8][4], const float (*last)[4]) {
         for (int c = 0; c < 4; c++) zero &= cur[i][c] == 0.0f, ours = ours && cur[i][c] == last[i][c];
     return zero ? kRigEmpty : ours ? kRigOurs : kRigGame;
 }
+// (S2-06 item 8b) Indoor furniture on Apex's indoor-object shader (lot_light_bridge DrawIndoorObject, path A) zeroes the
+// vertex lights the draw binds, since its directional maps hold the game's overflow lamps. The grid's light is kept there:
+// true when the bound rows (4 directions, then 4 colours, as the vertex shader constants hold them) are exactly the rig's
+// last write (last: RigEntry::written, null none) and that write is lit; false (zero them as before) for anything else.
+inline bool VertexLightsAreGrid(const float bound[8][4], const float (*last)[4]) {
+    if (RigSlotState(bound, last) != kRigOurs) return false;
+    for (int i = 4; i < 8; i++)
+        if (bound[i][0] > 0.0f || bound[i][1] > 0.0f || bound[i][2] > 0.0f) return true;
+    return false;
+}
 // An A16B16G16R16F channel
 inline float HalfToFloat(uint16_t h) {
     const int e = (h >> 10) & 0x1F, m = h & 0x3FF;

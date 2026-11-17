@@ -84,6 +84,7 @@ enum class Counter : int {
     RigDraws,          // (S2-06 item 8) rig binds whose vertex-light slots hold the grid's light (objects, Sims)
     RigReads,          // probe answers taken from the bridge's asynchronous read-back (no wait: the copy is already there)
     RigSkipped,        // rig binds left alone: the game's overflow lamps hold the vertex-light slots
+    IndoorRigDraws,    // (S2-06 item 8b) indoor-object draws (DrawIndoorObject) that keep the grid's vertex lights
     Count
 };
 void Add(Counter c, uint32_t n = 1); // any thread
@@ -142,6 +143,9 @@ struct IndirectBind {
     float vs[6][4] = {}; // c[kWallGiVsConst ..]: WallRows r0, r1, (the def), the lot rows
 };
 bool IndirectFor(const void* map, const float ambient[3], float night, IndirectBind& out);
+// (S2-06 item 8b) Render thread, an indoor-object draw: true (counted) when the vertex lights it binds (bound: 4 direction
+// rows, then 4 colour rows) are the grid's light written to rig `rig` (GiIndirect::VertexLightsAreGrid), so the draw keeps them
+bool GridVertexLights(uintptr_t rig, const float bound[8][4]);
 
 bool Start(const Options& options, std::string* error); // render thread or pump thread; the start line follows in a world
 void Stop();
