@@ -197,14 +197,31 @@ declaration keeps the declaration. The FVF moves into the client's State so a
 state block captures and applies it with the declaration, as d3d9 does. The
 sent-state cache already treated the two as replacing each other.
 
+While a state block is recorded (BeginStateBlock to EndStateBlock), both
+setters write the FVF and the declaration into the recorded block and mark its
+vertex declaration dirty, and the device's own state stays as it is, as on the
+server. Applying the block then sets the pair, and Capture takes the pair from
+the device.
+
 ## Testing
 - Built the bridge (x64 server, x86 client, release).
 - New bridge app test test_vertex_format_device: GetFVF returns 0 after
   SetVertexDeclaration, the declaration is gone after SetFVF and stays after
   SetFVF(0), and a state block restores the FVF and the declaration together.
+  Recording SetVertexDeclaration or SetFVF in a state block leaves GetFVF and
+  GetVertexDeclaration unchanged until the block is applied, and Capture of a
+  recorded block and of a D3DSBT_VERTEXSTATE block takes the pair. Passes
+  against a server on vanilla DXVK 3.1.1. The recording and Capture checks fail
+  on the previous version of this change.
 - Save/restore of the vertex input around a mid-frame pass keeps the game's
   fixed-function UI correct.
 ```
+
+The first review asked for the state block recording case: while BeginStateBlock records, the client changed
+its live FVF and declaration although the server only records them. The amended commit writes both into the
+recorded block and marks its vertex declaration dirty. The extended test passes against a server on vanilla
+DXVK 3.1.1, and its new recording and Capture checks fail on the first version of the commit. A server on
+system d3d9 cannot create a device on a hidden desktop (`D3DERR_NOTAVAILABLE`), so that run was not repeated.
 
 ### fix/surface-copy-zeroed
 
