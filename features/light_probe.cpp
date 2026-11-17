@@ -4,6 +4,7 @@
 #define NOMINMAX
 #endif
 #include "light_probe.h"
+#include "light_probe_budget.h"
 #include "ground_profile.h"
 #include "post_scene.h"
 #include "half_float.h"
@@ -52,7 +53,8 @@ constexpr int kPsConsts = 224; // ps_3_0
 constexpr int kVsConsts = 256; // vs_3_0 (skinned objects keep the world matrix and vertex lights at c184..c199)
 using ConstList = std::vector<std::pair<int, std::array<float, 4>>>; // non-zero registers only
 
-enum class State { Idle, Armed, Capturing };
+// Capturing: the recorded frame; Resolving: its occlusion answers, polled once a frame; Saving: its textures, a few a frame
+enum class State { Idle, Armed, Capturing, Resolving, Saving };
 
 // Raw geometry is kept only for a requested capture. Historical lighting-wall
 // notes do not identify the vertex UVs used by the draw that covers the pixel.
@@ -164,6 +166,21 @@ std::map<uint32_t, int> ShownStories() {
     return m;
 }
 UINT g_bbWidth = 0, g_bbHeight = 0;
+// The capture's time budget (light_probe_budget.h)
+using Clock = std::chrono::steady_clock;
+Clock::time_point g_recordStart, g_finishStart;
+double MsSince(Clock::time_point t) { return std::chrono::duration<double, std::milli>(Clock::now() - t).count(); }
+bool g_extrasOff = false;    // the recording frame's budget is spent: draws are recorded without their optional work
+bool g_abandon = false;      // the recording frame passed its deadline: no more draws, the capture is dropped
+int g_plainDraws = 0;        // draws recorded without their optional work
+double g_recordMs = 0;       // the recording frame, from its Present to the next
+int g_finishFrames = 0;      // frames that resolved or saved the capture
+size_t g_pending = 0;        // occlusion answers still missing
+bool g_hasColor = false;     // the screen pixel, read at the recording frame's Present
+float g_screen[3] = {};
+std::ostringstream g_report; // the capture's text while its textures are saved
+size_t g_saveNext = 0;       // the next texture to save
+int g_covering = 0, g_lateTextures = 0;
 std::vector<DrawRec> g_draws;
 std::vector<IDirect3DQuery9*> g_queryPool;
 std::string g_status = "Ready. Mouse over the ground and Ctrl+Shift+F7.";
@@ -956,7 +973,8 @@ template <typename DrawFn> D3D9Hooks::HookAction OnDraw(IDirect3DDevice9* dev, c
                                                      UINT startIndex = 0, INT baseVertex = 0, UINT minVertex = 0) {
     if (g_inProbeCall) return D3D9Hooks::HookAction::Continue;
 
-    if (g_state == State::Capturing && g_draws.size() < kMaxDraws) {
+    if (g_state == State::Capturing && !g_abandon && g_draws.size() < kMaxDraws) {
+        const bool extras = !g_extrasOff; // (decided after the previous draw, so Capturing() never changes inside a draw)
         IDirect3DSurface9* rt = nullptr;
         D3DSURFACE_DESC rd{};
         bool screenSized = false;
@@ -989,10 +1007,10 @@ template <typename DrawFn> D3D9Hooks::HookAction OnDraw(IDirect3DDevice9* dev, c
             dev->GetVertexShaderConstantF(0, &tmp[0][0], kVsConsts);
             for (int i = 0; i < kVsConsts; i++)
                 if (tmp[i][0] != 0 || tmp[i][1] != 0 || tmp[i][2] != 0 || tmp[i][3] != 0) r.vsc.push_back({i, {tmp[i][0], tmp[i][1], tmp[i][2], tmp[i][3]}});
-            r.bridge = LotLightBridge::DescribeDraw();
-            if (std::strcmp(kind, "DIP") == 0) r.instances = ReadInstances(dev);
+            r.bridge = extras ? LotLightBridge::DescribeDraw() : std::string("not described: past the capture's time budget");
+            if (extras && std::strcmp(kind, "DIP") == 0) r.instances = ReadInstances(dev);
             // Read wall geometry only when the shader identifies its clip/world matrices.
-            if (vertexCount) {
+            if (extras && vertexCount) {
                 UINT codeBytes=0;std::vector<DWORD> wallCode;
                 if(r.vs && SUCCEEDED(r.vs->GetFunction(nullptr,&codeBytes)) && codeBytes>=8 && codeBytes<=65536 && !(codeBytes%4)) {
                     wallCode.resize(codeBytes/4);
@@ -1050,15 +1068,22 @@ template <typename DrawFn> D3D9Hooks::HookAction OnDraw(IDirect3DDevice9* dev, c
             }
             // probed only when the draw covers the pixel (its query answered now): the 48 probed draws are the pixel's, not
             // the first lit draws of the frame
-            DWORD covered = 0;
-            if (q) {
-                const ULONGLONG until = GetTickCount64() + 50;
-                HRESULT hr;
-                while ((hr = q->GetData(&covered, sizeof(covered), D3DGETDATA_FLUSH)) == S_FALSE && GetTickCount64() < until) {}
-                if (hr != S_OK) covered = 1; // unknown: probed as before
-            }
-            if (!q || covered) r.probes = ProbeValues(dev, r.ps, r.tex, draw);
+            // (each wait and read-back is a round trip through the RTX Remix bridge: only within the frame's budget)
+            if (extras) {
+                DWORD covered = 0;
+                if (q) {
+                    const auto until = Clock::now() + std::chrono::duration<double, std::milli>(LightProbeBudget::CoverageWaitMs(MsSince(g_recordStart)));
+                    HRESULT hr;
+                    while ((hr = q->GetData(&covered, sizeof(covered), D3DGETDATA_FLUSH)) == S_FALSE && Clock::now() < until) {}
+                    if (hr != S_OK) covered = 1; // unknown: probed as before
+                }
+                if (!q || covered) r.probes = ProbeValues(dev, r.ps, r.tex, draw);
+            } else
+                g_plainDraws++;
             g_draws.push_back(std::move(r)); // reserved at capture start: never reallocates, cannot throw
+            const double ms = MsSince(g_recordStart);
+            g_extrasOff = !LightProbeBudget::ExtrasAllowed(ms);
+            g_abandon = LightProbeBudget::PastRecordDeadline(ms);
         }
     }
 
@@ -1330,39 +1355,44 @@ std::string WallUnderPixel(const DrawRec& d) {
     return s;
 }
 
-void FinishCapture(IDirect3DDevice9* dev) {
-    // Collect occlusion results
-    const auto t0 = std::chrono::steady_clock::now();
+// The occlusion answers, one pass (once a frame while Resolving): the number still missing
+size_t PollQueries() {
     size_t pending = 0;
-    do {
-        pending = 0;
-        for (auto& d : g_draws) {
-            if (d.resolved || !d.query) continue;
-            DWORD n = 0;
-            const HRESULT hr = d.query->GetData(&n, sizeof(n), D3DGETDATA_FLUSH);
-            if (hr == S_OK) {
-                d.samples = n;
-                d.resolved = true;
-            } else if (hr == S_FALSE)
-                pending++;
-            else
-                d.resolved = true;
-        }
-        if (pending) Sleep(1);
-    } while (pending && std::chrono::steady_clock::now() - t0 < std::chrono::milliseconds(1500));
+    for (auto& d : g_draws) {
+        if (d.resolved || !d.query) continue;
+        DWORD n = 0;
+        const HRESULT hr = d.query->GetData(&n, sizeof(n), D3DGETDATA_FLUSH);
+        if (hr == S_OK) {
+            d.samples = n;
+            d.resolved = true;
+        } else if (hr == S_FALSE)
+            pending++;
+        else
+            d.resolved = true;
+    }
+    return pending;
+}
 
+// The capture's text (all but its textures, which SaveTextures writes over the next frames)
+void WriteReport(IDirect3DDevice9* dev) {
+    const size_t pending = g_pending;
     ClearTextures();
     StartCaptureFolder();
     std::map<IDirect3DBaseTexture9*, int> texIndex;
-    std::ostringstream out; // written to the capture folder and to ApexRadiance_LightProbe.txt (the latest) at the end
+    g_report.str({});
+    g_report.clear();
+    std::ostringstream& out = g_report; // written to the capture folder at the end
     out << std::format("S3SS Light Probe | {} | pixel ({}, {}) | tela {}x{} | desenhos na tela: {} | sem resposta: {}\n", g_capName, g_pixel.x, g_pixel.y, g_bbWidth, g_bbHeight,
         g_draws.size(), pending);
     out << "Capture: " << g_captureWhy << "\n";
+    if (g_plainDraws)
+        out << std::format("Time budget: the recording frame passed {:.0f} ms; the last {} draws have no pixel values, wall geometry or mod detail\n",
+                           LightProbeBudget::kExtrasMs, g_plainDraws);
     out << "Estados: z/zwrite/zfunc/blend/src/dst/blendop/atest/cw/stencil/cull/srgb/depthbias/slopebias (bits de float)\n\n";
     int covering = 0, pickRank = -1;
     const DrawRec* pick = nullptr;
-    float screen[3] = {};
-    const bool hasColor = ReadScreenPixel(dev, screen);
+    const bool hasColor = g_hasColor;
+    const float* screen = g_screen;
     for (auto& d : g_draws) {
         if (d.samples == 0) continue;
         covering++;
@@ -1428,7 +1458,7 @@ void FinishCapture(IDirect3DDevice9* dev) {
         now.psc = pick->psc;
         now.vsc = pick->vsc;
         now.hasColor = hasColor;
-        std::memcpy(now.color, screen, sizeof screen);
+        std::memcpy(now.color, screen, sizeof now.color);
     }
     out << std::format("== COR NA TELA NO PIXEL: {}\n\n", hasColor ? std::format("({:.3f} {:.3f} {:.3f})", screen[0], screen[1], screen[2]) : std::string("(not read)"));
     GroundProfile::Write(dev, g_pixel, g_bbWidth, g_bbHeight, CapDir(), out);
@@ -1470,24 +1500,63 @@ void FinishCapture(IDirect3DDevice9* dev) {
     if (g_prevPick.valid && now.valid) WriteComparison(out, g_prevPick, now);
     if (now.valid) g_prevPick = std::move(now);
     out << "== TEXTURAS DOS DESENHOS QUE PINTAM O PIXEL ==\n";
-    for (size_t i = 0; i < g_textures.size(); i++) {
-        std::string file;
-        const std::string stats = DumpTexture(dev, g_textures[i].tex, std::format("T{}", i + 1), file);
-        g_textures[i].file = file;
-        out << std::format("T{} {}: {}\n", i + 1, g_textures[i].desc, stats);
-    }
-    const std::string report = out.str();
-    Captures::WriteText(CapDir() / "Light capture.txt", report);
-    ReleaseDraws();
-    g_status = std::format("Measured: {} draws cover pixel ({}, {}), {} textures saved in Captures\\{}.", covering, g_pixel.x, g_pixel.y, g_textures.size(), g_capName);
+    ReleaseDraws(); // (the listed textures keep their own references)
+    g_covering = covering;
+    g_saveNext = 0;
+    g_lateTextures = 0;
+}
+
+// The capture's end: its text written, the capture finished
+void EndCapture() {
+    Captures::WriteText(CapDir() / "Light capture.txt", g_report.str());
+    g_report.str({});
+    g_status = std::format("Measured: {} draws cover pixel ({}, {}), {} textures saved in Captures\\{}.", g_covering, g_pixel.x, g_pixel.y, g_textures.size() - g_lateTextures,
+                           g_capName);
     LOG_INFO("[LightProbe] " + g_status);
+    LOG_INFO(std::format("[LightProbe] Capture time: recording frame {:.0f} ms ({} draws past its {:.0f} ms budget recorded without their optional work), then {} frames "
+                         "over {:.0f} ms ({} occlusion answers missing, {} textures left out past the {:.0f} ms deadline)",
+                         g_recordMs, g_plainDraws, LightProbeBudget::kExtrasMs, g_finishFrames, MsSince(g_finishStart), g_pending, g_lateTextures,
+                         LightProbeBudget::kFinishDeadlineMs));
     Recorder::Note(std::format("[probe] {} ({})", g_capName, g_captureWhy));
     if (!g_into.empty()) {
         g_into.clear();
         return;
     }
     Captures::Finish(g_capDir, std::format("a light capture of the pixel ({}, {}) under the mouse: the {} draws that paint it and their textures ({})", g_pixel.x,
-                                           g_pixel.y, covering, g_captureWhy), Captures::CaptureKind::LightCapture);
+                                           g_pixel.y, g_covering, g_captureWhy), Captures::CaptureKind::LightCapture);
+}
+
+// A few textures a frame (kSaveFrameMs); past the deadline the rest are listed as left out. True when all are done
+bool SaveTextures(IDirect3DDevice9* dev) {
+    const auto t0 = Clock::now();
+    int written = 0;
+    const bool late = LightProbeBudget::PastFinishDeadline(MsSince(g_finishStart));
+    for (; g_saveNext < g_textures.size(); g_saveNext++) {
+        const size_t i = g_saveNext;
+        if (late) {
+            g_report << std::format("T{} {}: not saved (past the capture's time budget)\n", i + 1, g_textures[i].desc);
+            g_lateTextures++;
+            continue;
+        }
+        if (!LightProbeBudget::SaveMoreThisFrame(written, MsSince(t0))) return false;
+        std::string file;
+        const std::string stats = DumpTexture(dev, g_textures[i].tex, std::format("T{}", i + 1), file);
+        g_textures[i].file = file;
+        g_report << std::format("T{} {}: {}\n", i + 1, g_textures[i].desc, stats);
+        written++;
+    }
+    return true;
+}
+
+// A recording frame past its deadline: nothing is written, the frame is let go
+void AbandonCapture() {
+    g_status = std::format("Capture abandoned: the recording frame passed {:.0f} ms. Nothing was saved.", LightProbeBudget::kRecordDeadlineMs);
+    LOG_WARNING(std::format("[LightProbe] Capture abandoned: the recording frame took {:.0f} ms (deadline {:.0f} ms) after {} draws; nothing saved ({})", g_recordMs,
+                            LightProbeBudget::kRecordDeadlineMs, g_draws.size(), g_captureWhy));
+    Recorder::Note(std::format("[probe] capture abandoned past its deadline ({})", g_captureWhy));
+    ReleaseDraws();
+    if (g_wantCamera) PostScene::WantCamera(false), g_wantCamera = false;
+    g_into.clear();
 }
 
 // The next frame's draws over the pixel are recorded (back buffer pixels)
@@ -1515,7 +1584,8 @@ void StartCapture(IDirect3DDevice9* dev, POINT pixel, const std::string& why) {
 
 namespace LightProbe {
 
-bool Capturing() { return g_state == State::Capturing; }
+// (past the recording frame's budget other modules stop adding detail, and their memos work again)
+bool Capturing() { return g_state == State::Capturing && !g_extrasOff && !g_abandon; }
 bool Busy() { return g_state != State::Idle || g_aiming.load() || g_aimClick.load() != 0; }
 void Aim() { g_watch = Watch{}; g_aimClick.store(0); g_aiming.store(true); }
 bool Aiming() { return g_aiming.load(); }
@@ -1531,17 +1601,44 @@ void OnPresent(IDirect3DDevice9* dev) {
     if (!dev) return;
     RegisterPaintCheck();
     if (DevSwitches::kCompiled && !kPublicBuild.load(std::memory_order_relaxed)) ServicePaintChecks(dev);
+    // The capture's time budget (light_probe_budget.h): the recording frame stops its optional work after kExtrasMs and is
+    // dropped after kRecordDeadlineMs; the occlusion answers and texture files follow over the next frames
     if (g_state == State::Capturing) {
-        g_state = State::Idle;
-        FinishCapture(dev);
+        g_recordMs = MsSince(g_recordStart);
+        g_finishStart = Clock::now();
+        g_finishFrames = 0;
         if (!AnyBlank()) UnregisterHooks();
+        if (g_abandon) {
+            g_state = State::Idle;
+            AbandonCapture();
+        } else {
+            g_hasColor = ReadScreenPixel(dev, g_screen); // (this frame's picture, before later frames replace it)
+            g_state = State::Resolving;
+        }
     } else if (g_state == State::Armed) {
         // reserve up front so recording a draw (after its probe draw was issued) can never throw
         try {
             g_draws.reserve(kMaxDraws);
+            g_extrasOff = g_abandon = false;
+            g_plainDraws = 0;
+            g_recordStart = Clock::now();
             g_state = State::Capturing; // draws of the next frame are recorded
         } catch (...) {
             g_state = State::Idle; // no memory for the capture: skip it
+        }
+    }
+    if (g_state == State::Resolving) {
+        g_finishFrames++;
+        g_pending = PollQueries();
+        if (!LightProbeBudget::KeepResolving(MsSince(g_finishStart), g_pending != 0)) {
+            WriteReport(dev);
+            g_state = State::Saving;
+        }
+    } else if (g_state == State::Saving) {
+        g_finishFrames++;
+        if (SaveTextures(dev)) {
+            g_state = State::Idle;
+            EndCapture();
         }
     }
     if (g_state == State::Idle) g_into.clear(); // (a capture that ended early must not send the next one to that folder)

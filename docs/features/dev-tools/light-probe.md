@@ -40,9 +40,10 @@ only the draws that really reach that pixel are reported.
 2. **Record.** In the next frame, every draw into a screen-sized render target is recorded: textures, filters, shaders,
    render states, constants and Night Lighting's description of the draw. A second copy of the draw, with colour and
    depth writes off and a 1x1 scissor, runs inside an occlusion query.
-3. **Finish.** At the following Present the queries are read; draws with samples > 0 are written to
+3. **Finish.** From the following Present the queries are read, once a frame; draws with samples > 0 are written to
    `Light capture.txt` with their shaders and textures, in a new dated capture folder, followed by a
-   [ground light profile](#ground-light-profile) through the lot lamp nearest the mouse.
+   [ground light profile](#ground-light-profile) through the lot lamp nearest the mouse. The textures are saved a few
+   a frame (see [Time budget](#time-budget)).
 4. **One capture per request.** No capture is taken automatically: a floor change does not start another one.
 5. **Compare.** Two consecutive captures (piece A, then piece B) end with a register-by-register comparison of the
    object draw chosen at each pixel.
@@ -78,7 +79,9 @@ only the draws that really reach that pixel are reported.
 - Only draws whose render target 0 has the back-buffer size are probed. Shadow maps, bloom, reflection maps and
   half-resolution passes never appear. `DrawPrimitiveUP` and `DrawIndexedPrimitiveUP` are not hooked.
 - At most 4,000 screen-sized draws per capture.
-- The query wait can stall the render thread for up to 1.5 s (a visible hitch).
+- The recorded frame is held for up to about 0.3 s (the time budget); a frame that takes longer than 3 s even
+  without the optional work is dropped and nothing is saved. Through the RTX Remix bridge most draws of a busy frame
+  then have no pixel values, wall geometry or `mod:` detail (`not described: past the capture's time budget`).
 - The pixel is mapped by client-rectangle scaling; with the Apex menu open the cursor may be over the menu.
 - The final colour is read only from 8-bit `X8R8G8B8` / `A8R8G8B8` back buffers; otherwise the file says
   `(not read)`.
@@ -94,14 +97,18 @@ only the draws that really reach that pixel are reported.
 
 ### State machine
 
-`enum class State { Idle, Armed, Capturing }` in `light_probe.cpp`, driven by `LightProbe::OnPresent(device)`, which
+`enum class State { Idle, Armed, Capturing, Resolving, Saving }` in `light_probe.cpp`, driven by `LightProbe::OnPresent(device)`, which
 Night Lighting's Present hook calls every frame (`patches/night_terrain_relight_patch.cpp`, after its own `OnPresent`).
 
 | Present | Transition | Work |
 |---|---|---|
 | N | Idle -> Armed | `Hotkeys::Take(Action::Probe)` (or a confirmed click): reads the back-buffer size, converts the cursor to client coordinates of `D3DDEVICE_CREATION_PARAMETERS::hFocusWindow` (or the foreground window), scales to back-buffer pixels (clamped), releases the previous draw list, registers `RegisterDrawIndexedPrimitive` / `RegisterDrawPrimitive` (name `"LightProbe"`, `Priority::Last`), posts the note "Capturing the light under the mouse…" |
 | N+1 | Armed -> Capturing | the draws of the following frame are recorded |
-| N+2 | Capturing -> Idle | `FinishCapture`, then the hooks are unregistered unless a texture is replaced |
+| N+2 | Capturing -> Resolving (or Idle) | the hooks are unregistered unless a texture is replaced; the screen pixel is read; past the record deadline the capture is abandoned (`AbandonCapture`) |
+| N+2.. | Resolving -> Saving | `PollQueries` once a frame until every answer is in or 1.5 s passed, then `WriteReport` |
+| ..N+k | Saving -> Idle | `SaveTextures` a few a frame, then `EndCapture` writes `Light capture.txt` and finishes the capture |
+
+`Busy()` is true until Idle, so a capture session or a screenshot burst waits for the files.
 
 ### Per draw while capturing
 
@@ -120,13 +127,36 @@ Only when render target 0 has the back-buffer size, up to `kMaxDraws = 4000`:
 Occlusion samples mean "fragments of this draw at that pixel that passed the depth, stencil and alpha tests when it ran".
 A draw later overdrawn still has samples > 0. The value is the MSAA sample count (`amostras=8` with 8x MSAA).
 
-### FinishCapture
+### Finishing
 
-Polls every query with `D3DGETDATA_FLUSH` in a `Sleep(1)` loop for at most 1.5 s; queries still pending are counted as
-`sem resposta` and their draws dropped. Reads the final colour (`ReadScreenPixel`: `StretchRect` of the pixel to a 1x1
-render target, then `GetRenderTargetData`). Writes the report, dumps shaders and textures, releases the references and
-calls `Captures::Finish(folder, ..., CaptureKind::LightCapture)`. Status line:
-`Measured: N draws cover pixel (x, y), M textures saved in Captures\<folder>.`, also logged as `[LightProbe] ...`.
+At the recording frame's Present the final colour is read (`ReadScreenPixel`: `StretchRect` of the pixel to a 1x1
+render target, then `GetRenderTargetData`). Then, once a frame, `PollQueries` reads every query with
+`D3DGETDATA_FLUSH`; after 1.5 s the queries still pending are counted as `sem resposta` and their draws dropped.
+`WriteReport` builds the report and dumps the shaders; `SaveTextures` dumps the textures over the next frames;
+`EndCapture` writes the file and calls `Captures::Finish(folder, ..., CaptureKind::LightCapture)`. Status line:
+`Measured: N draws cover pixel (x, y), M textures saved in Captures\<folder>.`, also logged as `[LightProbe] ...`,
+followed by `[LightProbe] Capture time: recording frame ... ms (... draws past its 250 ms budget ...), then ... frames
+over ... ms (...)`.
+
+### Time budget
+
+[`features/light_probe_budget.h`](../../../features/light_probe_budget.h) holds the limits, checked offline by
+`tools/light_probe_budget_test`. Through the RTX Remix bridge each per-draw coverage wait (up to 50 ms) and each 1 x 1
+read-back of the probed values is a round trip, and Night Lighting's `mod:` detail turns its lamp memos off while
+`Capturing()`; one recorded frame took 28-60 s in a recorded-scenes run (inferred cause: the per-draw work, as the
+frame's other work is the game's own).
+
+| Limit | Value | Effect |
+|---|---|---|
+| `kExtrasMs` | 250 ms | after it, the remaining draws of the recorded frame are recorded without the coverage wait, probed values, instance data, wall geometry and `mod:` detail; `Capturing()` turns false so other modules stop adding detail |
+| `kCoverageWaitMs` | 50 ms | the longest wait for one draw's answer, shortened to the budget left |
+| `kRecordDeadlineMs` | 3 s | a recorded frame still running past it records no more draws; at its Present the capture is abandoned with `[LightProbe] Capture abandoned: ...` (warning) and nothing is saved |
+| `kResolveMs` | 1.5 s | occlusion answers are polled once a frame for this long |
+| `kSaveFrameMs` | 8 ms | textures written per frame (at least one) |
+| `kFinishDeadlineMs` | 20 s | from the recorded frame's end; textures not written by then are listed as `not saved (past the capture's time budget)` |
+
+A texture is saved a few frames after the recorded frame, so a render target the game rewrites every frame shows a
+later frame's content.
 
 ### Ground light profile
 

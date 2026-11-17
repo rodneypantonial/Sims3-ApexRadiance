@@ -373,6 +373,7 @@
     <ClInclude Include="features\wall_heights.h" />
     <ClInclude Include="features\light_diag.h" />
     <ClInclude Include="features\light_probe.h" />
+    <ClInclude Include="features\light_probe_budget.h" />
     <ClInclude Include="features\ground_profile.h" />
     <ClInclude Include="features\ground_profile_math.h" />
     <ClInclude Include="features\lightmap_smooth.h" />

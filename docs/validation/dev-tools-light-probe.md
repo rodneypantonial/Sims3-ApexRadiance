@@ -13,6 +13,7 @@ The feature is described in [features/dev-tools/light-probe.md](../features/dev-
 | Harness | Covers | Run | Needs |
 |---|---|---|---|
 | [`tools/report_check`](../../tools/report_check/README.md) | Capture folder storage and the Report page control that shows the probe key; probe requests are stubbed | See the harness README | None (x86 MSVC, ImGui from vcpkg) |
+| `tools/light_probe_budget_test` | The capture's time budget (`features/light_probe_budget.h`) on a simulated clock: a slow recorded frame ends near its budget, a stuck one is dropped at its deadline, textures are spread over frames | `run.ps1` | None (x86 MSVC) |
 
 The probe's GPU path (occlusion queries, constant reads, texture dumps) has no offline harness. The ground light
 profile's camera math (`features/ground_profile_math.h`: the 4x4 inverse, a world point's pixel and the ground point
