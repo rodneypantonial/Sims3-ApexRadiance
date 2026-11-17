@@ -91,7 +91,8 @@ sort. This changes no triangle counts or tie ordering.
   samples to it. See [history](../../history/performance-fast-cas-sort.md).
 - Reading the texture compositor's tiles back in a later frame (`features/compositor_readback.cpp`, not started): the
   same bytes without the GPU wait, but one tile per frame, so Sim and object textures built more slowly
-  ([history](../../history/performance-fast-cas-sort.md)).
+  ([history](../../history/performance-fast-cas-sort.md)). Static reading of the compositor queue for several tiles in
+  flight: [compositor-async-re.md](../compositor-async-re.md).
 
 ## See also
 
