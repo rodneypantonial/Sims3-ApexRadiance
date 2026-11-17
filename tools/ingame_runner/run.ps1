@@ -388,6 +388,15 @@ function Invoke-Load($Load, [string]$BaseToml) {
                     $null = [ApexIngame.Keys]::PostMessage($script:proc.MainWindowHandle, 0x101, [IntPtr][int]$step.vk, [IntPtr]0xC0000001)
                     Say "  step ${n}: key $($step.vk)"
                 }
+                'mouse' { # mouse moves posted to the game window, never focused: `points` ([{x,y}] client pixels) one after the other, `delay_ms` apart (default 50); makes the game pick under the cursor
+                    $script:proc.Refresh()
+                    $dly = if ($step.delay_ms) { [int]$step.delay_ms } else { 50 }
+                    foreach ($pt in $step.points) {
+                        $null = [ApexIngame.Keys]::PostMessage($script:proc.MainWindowHandle, 0x200, [IntPtr]0, [IntPtr](([int]$pt.y -shl 16) -bor ([int]$pt.x -band 0xFFFF)))
+                        Start-Sleep -Milliseconds $dly
+                    }
+                    Say "  step ${n}: mouse over $(@($step.points).Count) point(s)"
+                }
                 'memory' { # the game's largest free address block, read from outside (no agent call, no game work)
                     $mb = [math]::Round($script:mbox.LargestFree() / 1MB)
                     $result.FreeMB = $mb # the last reading is the load's value in the A/B table
