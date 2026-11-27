@@ -140,6 +140,7 @@ public sealed partial class MainWindow : Window
         if (!tour) StartUpgrade();
         var pending = tour ? Task.CompletedTask : OpenPendingAsync();
         await LoadReleasesAsync();
+        if (!tour) MenuTheme();
         if (tour) _ = AuditTourAsync();
         await pending; // (before the dialogs below: a newer one would close theirs)
         // (the launcher's choices, applied as if Apply was clicked: the player already did, before Windows asked)
@@ -555,7 +556,7 @@ public sealed partial class MainWindow : Window
 
     // A first install (and the updates Play puts in) runs its steps in one card in the middle of the window, without the
     // sidebar: none of it works before Apex Radiance is in. Any other screen leaves the card.
-    bool _wizardFlow, _updatingForPlay, _playAnyway;
+    bool _wizardFlow, _updatingForPlay, _updatingOnly, _playAnyway; // (_updatingOnly: Home's update button, an update without Play)
     readonly Dictionary<FrameworkElement, Panel> _moved = new();
     StackPanel? _fpsBox;
     (string? Bin, bool Writable) _writableFor = (null, true);
@@ -845,6 +846,8 @@ public sealed partial class MainWindow : Window
         if (!wizard && SmoothSection.Visibility == Visibility.Visible && FpsCard.Visibility == Visibility.Visible)
         {
             FpsCombo.MinWidth = 0; FpsCombo.Width = 200;
+            // (Custom's number box under the list, as wide: beside it, the pair ran out of the row's control slot and cut the list)
+            if (_fpsBox is StackPanel pair) { pair.Orientation = Orientation.Vertical; FpsCustom.Width = 200; }
             Row(IconBox("gauge"), T("Apex frame limit"), FpsDesc.Text, null, State(FpsPill), _fpsWant is not null, Adopt(_fpsBox, FpsCard));
         }
         if (!wizard) return;
@@ -963,7 +966,9 @@ public sealed partial class MainWindow : Window
             bool above = Row(i - 1), below = Row(i + 1);
             const double r = Design.Radius.Card;
             b.CornerRadius = new CornerRadius(above ? 0 : r, above ? 0 : r, below ? 0 : r, below ? 0 : r);
-            b.BorderThickness = new Thickness(1, 1, 1, below ? 0 : 1);
+            // (a group's heading and its first row read as one: no line between them)
+            var head = above && rows[i - 1] is Border { Tag: "group" };
+            b.BorderThickness = new Thickness(1, head ? 0 : 1, 1, below ? 0 : 1);
             b.Margin = new Thickness(0, above ? -gap : 0, 0, 0);
         }
     }
@@ -1008,7 +1013,9 @@ public sealed partial class MainWindow : Window
 
     // the status bars in a tint of their colour and the window's caption buttons, for the theme in use
     // (one brush each, its colour changed with the theme: what is on screen follows at once)
-    readonly SolidColorBrush QuietBox = new(), _over = new(), _overEdge = new(), _content = new(), _contentEdge = new();
+    // (brushes of their own whose colour changes with the theme: a control keeps the brush it read, so one of the theme's own
+    // brushes given here would stay in the old theme after a switch)
+    readonly SolidColorBrush QuietBox = new(), _over = new(), _overEdge = new(), _content = new(), _contentEdge = new(), _listBox = new(), _viewOn = new();
 
     void ThemeChrome()
     {
@@ -1025,7 +1032,8 @@ public sealed partial class MainWindow : Window
         // (the boxes of the list: drawn to be found, not to be seen first)
         (QuietBox.Color, _over.Color, _overEdge.Color) = (Tone("InputBorderHover"), Tone("Raised"), Tone("InputBorder"));
         ModListHead.Resources["CheckBoxCheckBackgroundStrokeUnchecked"] = QuietBox;
-        ModList.Resources["CheckBoxCheckBackgroundStrokeUnchecked"] = ModList.Resources["CheckBoxCheckBackgroundStrokeUncheckedPointerOver"] = Res("ApexSoftTextBrush");
+        (_listBox.Color, _viewOn.Color) = (Tone("SoftText"), Tone("Selected"));
+        ModList.Resources["CheckBoxCheckBackgroundStrokeUnchecked"] = ModList.Resources["CheckBoxCheckBackgroundStrokeUncheckedPointerOver"] = _listBox;
         // (what opens over a screen: one quiet surface with an edge of its own. Here and not in App.xaml: a theme dictionary there
         // does not reach these. A contrast theme keeps its own)
         if (!new Windows.UI.ViewManagement.AccessibilitySettings().HighContrast)
@@ -1039,7 +1047,7 @@ public sealed partial class MainWindow : Window
         // Mods' two views, as the gallery's: the one in use on a quiet pill
         foreach (var view in new[] { ModsViewList, ModsViewGallery })
             foreach (var state in new[] { "", "PointerOver", "Pressed" })
-                view.Resources["ToggleButtonBackgroundChecked" + state] = Res("ApexSelectedBrush");
+                view.Resources["ToggleButtonBackgroundChecked" + state] = _viewOn;
         if (AppWindow?.TitleBar is { } bar)
         {
             var fg = _light ? Microsoft.UI.Colors.Black : Microsoft.UI.Colors.White;
@@ -2063,8 +2071,9 @@ public sealed partial class MainWindow : Window
         // (drivers: a frame generation change, or a removal that turns off the frame generation the launcher turned on)
         var drivers = !inline && SettingChanges(remove).Any(c => c.Kind is "nv" or "amd")
             || remove?.Any(Engine.TurnsFrameGenOff) == true && (SmoothMotion.SetupTurnedOn || Afmf.SetupTurnedOn);
-        // (Update and play carries only its updates to the administrator window, not what Components shows)
-        if (!await CanChangeHere(inline ? "welcome" : "components", drivers, _updatingForPlay ? comps : null))
+        // (Update and play, and Home's update button, carry only their updates to the administrator window, not what
+        // Components shows)
+        if (!await CanChangeHere(inline ? "welcome" : "components", drivers, _updatingForPlay || _updatingOnly ? comps : null))
         {
             // (installed in the administrator window, which wrote the game folder's settings: the player's own files here)
             if (firstInstall && !FirstInstall) await ApplyWizardSettings(g, bin: false, docs: true);
@@ -2227,14 +2236,14 @@ public sealed partial class MainWindow : Window
                 _defaultsFor = left is null ? _game : null;
                 _busy = false;
                 // (Cancel and undo: everything is back as it was, and the install returns to its choices)
-                if (ex is OperationCanceledException && left is null) { Show(_updatingForPlay ? Home : ComponentsStep); return; }
+                if (ex is OperationCanceledException && left is null) { Show(_updatingForPlay || _updatingOnly ? Home : ComponentsStep); return; }
                 for (int i = 0; i < rows.Count; i++) rows[i](i < at ? 4 : i == at ? 3 : 0);
                 var again = await WizardFailed(net, text, left, offerDxvk: order.Contains(Components.Bridge) && !VulkanBlocked);
                 if (again == "try") { await InstallAsync(comps, remove, inline, settingsOnly); return; }
                 // (the bridge would not install: the same install with DXVK in its place)
                 if (again == "dxvk") { _defaultsFor = _game; _renderer = RDxvk; RefreshComponents(); var (da, dd) = Plan(); await InstallAsync(da, dd); return; }
                 if (again == "play") { _playAnyway = true; return; }
-                Show(_updatingForPlay ? Home : ComponentsStep);
+                Show(_updatingForPlay || _updatingOnly ? Home : ComponentsStep);
                 return;
             }
             // the files it changed before the error are put back: half an install is the worse state. Keeping them is the
@@ -2276,7 +2285,7 @@ public sealed partial class MainWindow : Window
     async Task<string?> WizardFailed(bool net, string text, string? left, bool offerDxvk = false)
     {
         // a first install: said in its own card, where the steps are (the install's prototype); an update keeps the dialog
-        if (!_updatingForPlay && _step == InstallStep && left is null)
+        if (!_updatingForPlay && !_updatingOnly && _step == InstallStep && left is null)
         {
             InstallRing.Visibility = Visibility.Collapsed;
             InstallFailBadge.Visibility = InstallCopy.Visibility = Visibility.Visible;
@@ -2304,7 +2313,7 @@ public sealed partial class MainWindow : Window
         var body = new StackPanel { Spacing = 16, Width = Design.Dialogs.Small };
         var what = left is not null ? T("Some files couldn't be restored: {0}. Use Repair or remove to fix the game.", left)
             : net ? T("The launcher can't reach GitHub. Check your internet connection and try again.")
-            : update ? T("The game is as it was before the update.") : T("Everything added so far was removed again.");
+            : update || _updatingOnly ? T("The game is as it was before the update.") : T("Everything added so far was removed again.");
         body.Children.Add(Design.Dialogs.Words(text));
         body.Children.Add(Design.Dialogs.Words(what));
         var copy = new HyperlinkButton { Content = T("Copy details"), Padding = new Thickness(0) };
@@ -2312,7 +2321,7 @@ public sealed partial class MainWindow : Window
         body.Children.Add(copy);
         var r = await ShowDialog(new ContentDialog
         {
-            Tag = "!triangle-alert", Title = left is not null ? T("The launcher could not finish") : update ? T("The update wasn't installed") : T("Nothing was changed"),
+            Tag = "!triangle-alert", Title = left is not null ? T("The launcher could not finish") : update || _updatingOnly ? T("The update wasn't installed") : T("Nothing was changed"),
             Content = body, PrimaryButtonText = T("Try again"), SecondaryButtonText = update ? T("Play anyway") : "", CloseButtonText = update ? T("Cancel") : T("Back"),
             DefaultButton = ContentDialogButton.Primary, XamlRoot = Content.XamlRoot,
         });

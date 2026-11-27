@@ -39,9 +39,12 @@ public sealed partial class MainWindow
             below.Children.Add(Banner(InfoBarSeverity.Error, T("Apex Radiance can't start"), T("The game still starts, but without Apex Radiance until this is fixed."), T("Open Health"), () => Show(HealthScreen)));
         if (_offline) below.Children.Add(Banner(InfoBarSeverity.Warning, T("No internet"), T("You can still play. Updates wait until you're back online."), T("Try again"), async () => await LoadReleasesAsync()));
         // the last session shows only when it went wrong: straight back into the newest save
-        if (!_running && SessionHistory.List().FirstOrDefault() is { End: SessionEnd.Crash or SessionEnd.LowMemory } last && Saves.Newest(Docs) is { } newest)
+        // (its close button hides that session's note for good)
+        if (!_running && SessionHistory.List().FirstOrDefault() is { End: SessionEnd.Crash or SessionEnd.LowMemory } last && last.Started != _settings.SessionDismissed
+            && Saves.Newest(Docs) is { } newest)
             below.Children.Add(Banner(InfoBarSeverity.Warning, last.End == SessionEnd.Crash ? T("The game closed on its own") : T("Ran out of memory"),
-                Played(last.Played) + " · " + T("memory peaked at {0}", ModRow.SizeText(last.PeakBytes)), T("Open this save again"), async () => await PlayAsync(newest.Name)));
+                Played(last.Played) + " · " + T("memory peaked at {0}", ModRow.SizeText(last.PeakBytes)), T("Open this save again"), async () => await PlayAsync(newest.Name),
+                () => { _settings.SessionDismissed = last.Started; _settings.Save(); }));
         if (saves.Count > 0) below.Children.Add(HomeSaves(saves.Take(4).ToList()));
         below.Children.Add(HomePictures());
         host.Children.Add(below);
@@ -106,7 +109,11 @@ public sealed partial class MainWindow
         {
             // the picture as a rounded card inside the page's margins, at full strength unless Settings softens it, with a soft
             // shade in the corner where the words sit so they read on any picture without a box over it
-            pic.Children.Add(new Image { Source = Thumb(shot, 2000), Stretch = Stretch.UniformToFill, VerticalAlignment = VerticalAlignment.Center, Opacity = Math.Clamp(_settings.HomePictureStrength, 30, 100) / 100.0 });
+            // The picture is never cut: the top takes its own shape once it is read.
+            var source = Thumb(shot, 2000);
+            source.ImageOpened += (_, _) => { if (source.PixelWidth > 0) { _homeRatio = (double)source.PixelHeight / source.PixelWidth; FitHome(); } };
+            var strength = Math.Clamp(_settings.HomePictureStrength, 30, 100) / 100.0;
+            pic.Children.Add(new Image { Source = source, Stretch = Stretch.UniformToFill, VerticalAlignment = VerticalAlignment.Center, Opacity = strength });
             var black = Windows.UI.Color.FromArgb(255, 8, 8, 8);
             pic.Children.Add(new Border { IsHitTestVisible = false, Background = Fade(black, [(0, 0xC8), (0.3, 0x66), (0.6, 0)]) });
             pic.Children.Add(new Border { IsHitTestVisible = false, Background = Fade(black, [(0, 0x8C), (0.35, 0x26), (0.55, 0)], across: true) });
@@ -157,6 +164,7 @@ public sealed partial class MainWindow
     StackPanel? _homeWords;
     TextBlock? _homeName;
     bool _homeFitHooked, _homeOnPhoto;
+    double _homeRatio = 9 / 16.0;
 
     // the top keeps the picture's own wide shape as the window grows, within the share of the window Settings' picture
     // height allows (a plain card takes the height of its words); the name grows a little with it
@@ -164,8 +172,8 @@ public sealed partial class MainWindow
     {
         double w = Scroller.ActualWidth, h = Scroller.ActualHeight;
         if (_homeHero is null || w <= 0 || h <= 0) return;
-        var share = Math.Clamp(_settings.HomePictureHeight / 480.0 * 0.9, 0.42, 0.88);
-        if (_homeOnPhoto) _homeHero.Height = Math.Clamp(w * 0.44, 360, Math.Max(360, h * share));
+        // (the picture inside the page margins at its own shape, plus the margin above it)
+        if (_homeOnPhoto) _homeHero.Height = Math.Max(360, (w - 2 * Design.Space.Page) * _homeRatio + Design.Space.X6);
         if (_homeName is not null) { _homeName.FontSize = Math.Clamp(w / 32, 40, 64); _homeName.LineHeight = _homeName.FontSize * 1.08; }
         if (_homeWords is not null) _homeWords.MaxWidth = Math.Max(560, w * 0.42);
     }
@@ -212,6 +220,21 @@ public sealed partial class MainWindow
         var update = WelcomeUpdates().Count > 0 && _settings.InstallUpdatesOnPlay;
         var blocked = _healthState == HealthState.Blocked;
         row.Children.Add(PlayButton(null));
+        // the ready updates, installed now without starting the game: the same square as More, beside Play
+        if (WelcomeUpdates() is { Count: > 0 } ready)
+        {
+            var install = new Button
+            {
+                Width = 56, Height = 56, Padding = new Thickness(0), CornerRadius = new CornerRadius(Design.Radius.Control), Background = glass, BorderThickness = new Thickness(0),
+                IsEnabled = !_busy && !Maintenance, Content = new LucideIcon { Kind = "download", Size = Design.Size.IconSmall, Stroke = ink, StrokeWidth = 1.75 },
+            };
+            var what = ready.Count == 1 ? T("Install 1 update") : T("Install {0} updates", ready.Count);
+            ToolTipService.SetToolTip(install, what + "\n" + string.Join("\n", ready.Select(c => Name(c) + " " + (ReleaseOf(c)?.Version ?? ""))));
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(install, what);
+            Microsoft.UI.Xaml.Automation.AutomationProperties.SetAutomationId(install, "HomeUpdateButton");
+            install.Click += async (_, _) => await UpdateOnlyAsync();
+            row.Children.Add(install);
+        }
 
         var menu = new MenuFlyout { Placement = Microsoft.UI.Xaml.Controls.Primitives.FlyoutPlacementMode.BottomEdgeAlignedLeft };
         if (update && !blocked)
@@ -226,7 +249,7 @@ public sealed partial class MainWindow
         menu.Items.Add(all);
         var more = new Button
         {
-            Width = 56, Height = 56, Padding = new Thickness(0), CornerRadius = new CornerRadius(8), Background = glass, BorderThickness = new Thickness(0), Flyout = menu,
+            Width = 56, Height = 56, Padding = new Thickness(0), CornerRadius = new CornerRadius(Design.Radius.Control), Background = glass, BorderThickness = new Thickness(0), Flyout = menu,
             Content = new LucideIcon { Kind = "ellipsis", Size = 16, Stroke = ink, StrokeWidth = 1.75 },
         };
         ToolTipService.SetToolTip(more, T("More options"));
@@ -310,8 +333,10 @@ public sealed partial class MainWindow
         // the light around the crystal, round, over the glass's edge rather than under it (glass would blur it into a block)
         var tint = StateTint(255);
         var fade = new Microsoft.UI.Xaml.Media.RadialGradientBrush();
+        // (on the picture the light has to carry over its colours; on the plain card the same strength blooms into a block)
+        var peak = photo ? (calm ? 0xC0 : 0xE8) : (calm ? 0x38 : 0x50);
         foreach (var (at, share) in new[] { (0.0, 1.0), (0.25, 0.8), (0.45, 0.48), (0.65, 0.2), (0.82, 0.06), (1.0, 0.0) })
-            fade.GradientStops.Add(new GradientStop { Offset = at, Color = Alpha(tint, (byte)(share * (calm ? 0xC0 : 0xE8))) });
+            fade.GradientStops.Add(new GradientStop { Offset = at, Color = Alpha(tint, (byte)(share * peak)) });
         var pulse = new ScaleTransform();
         var glow = new Microsoft.UI.Xaml.Shapes.Ellipse { Width = light, Height = light, Fill = fade, RenderTransform = pulse, RenderTransformOrigin = new Windows.Foundation.Point(0.5, 0.5) };
         // (a canvas, so nothing cuts the light at a box's edge)

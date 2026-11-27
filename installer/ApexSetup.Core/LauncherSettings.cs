@@ -6,17 +6,18 @@ namespace ApexSetup;
 // with Windows is the Run key itself, LauncherInstall.RunsAtStartup).
 public sealed class LauncherSettings
 {
-    public bool FixSafeAutomatically { get; set; } = true;
+    // (off by default: Play asks first. A new name, so the old FixSafeAutomatically, on for everyone, is not carried over)
+    public bool FixWithoutAsking { get; set; }
     public bool InstallUpdatesOnPlay { get; set; } = true;
     public bool HideWhilePlaying { get; set; } = true;
     public bool WelcomedBack { get; set; }
     public bool DesktopShortcut { get; set; } = true;
     public string HomePicture { get; set; } = "gallery"; // the picture on top of Home: "gallery", "household" or "none"
-    public int HomePictureHeight { get; set; } = 330;     // its height on Home, in pixels
     public int HomePictureStrength { get; set; } = 100;   // how strongly it shows, 30 to 100 (%)
     public string Backdrop { get; set; } = "mica";        // the window's background: "mica", "micaalt", "acrylic" or "solid"
     public string Theme { get; set; } = "amethyst";       // the colours (Design/Themes.cs), or "windows" for Windows' accent
     public string Mode { get; set; } = "system";          // "system" (as Windows), "dark" or "light"
+    public DateTime? SessionDismissed { get; set; }      // the start of the last session whose "closed on its own" note was closed on Home
     public bool NavCompact { get; set; }                  // the side pane kept to its icons (the toggle at its top)
 
     // the game options chosen before the game ever wrote Options.ini, by its Documents folder: set once the game has made it

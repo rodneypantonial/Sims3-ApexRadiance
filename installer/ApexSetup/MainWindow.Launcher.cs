@@ -194,6 +194,17 @@ public sealed partial class MainWindow
         finally { _starting = false; }
     }
 
+    // Home's update button: the ready updates in the install card, then the done screen; the game is not started
+    async Task UpdateOnlyAsync()
+    {
+        if (_game is null || _busy || _starting || WelcomeUpdates() is not { Count: > 0 } ups) return;
+        if (_running || _session is not null || Games.IsRunning()) { await Message(T("The Sims 3 is already running"), T("Close the game, then install the updates.")); return; }
+        _wizardFlow = _updatingOnly = true;
+        try { await InstallAsync(ups); }
+        // (the done screen keeps the install card's layout: leaving it ends the flow, WizardChrome)
+        finally { _updatingOnly = false; if (_step != DoneStep) _wizardFlow = false; }
+    }
+
     async Task StartChecked(Game g, string? save, bool update)
     {
         if (update && WelcomeUpdates() is { Count: > 0 } pending && await UpdatesFirst(pending) is var go && go != true)
@@ -217,10 +228,17 @@ public sealed partial class MainWindow
         var (docs, apex) = (Docs, _latest.GetValueOrDefault(Releases.Apex));
         Task<List<Health.Item>> BeforePlay() => _state is { } s ? Task.Run(() => Health.Gather(g, s, docs, apex, beforePlay: true).Where(i => !IsIgnored(i)).ToList()) : Task.FromResult(new List<Health.Item>());
         var found = await BeforePlay();
-        // the fixes that are safe to make without asking (each keeps a copy of the file it changes). Never an administrator
-        // prompt from Play: where the game's folder needs one, they wait on Health. A fix that fails does not stop the start.
-        if (_settings.FixSafeAutomatically && found.Any(i => i.Finding.CanFix) && (Elevation.IsElevated || DryRun || Elevation.CanWrite(g.Bin))
-            && await Guarded(() => { Engine.CheckWritable(); foreach (var x in Compat.Check(g, Scan.Run(g)).Where(x => x.CanFix)) x.Fix!(); },
+        // the safe fixes (each keeps a copy of the file it changes): offered before the start, made without asking only when
+        // the player chose that in Settings. Never an administrator prompt from Play: where the game's folder needs one, they
+        // wait on Health. A fix that fails does not stop the start.
+        var fix = false;
+        if (found.Where(i => i.Finding.CanFix).ToList() is { Count: > 0 } fixable && (Elevation.IsElevated || DryRun || Elevation.CanWrite(g.Bin)))
+        {
+            if (_settings.FixWithoutAsking) fix = true;
+            else if (await FixesFirst(fixable) is { } yes) fix = yes;
+            else return; // (Cancel)
+        }
+        if (fix && await Guarded(() => { Engine.CheckWritable(); foreach (var x in Compat.Check(g, Scan.Run(g)).Where(x => x.CanFix)) x.Fix!(); },
                 T("Fixed"), null, "Fix incompatible settings"))
         {
             RefreshGame(); // (starts the full check too)
@@ -241,13 +259,23 @@ public sealed partial class MainWindow
         await StartGameAsync(g, save);
     }
 
+    // the launcher's colour theme into Apex's own menu, which reads it when the game starts
+    void MenuTheme(Game? g = null)
+    {
+        if ((g ?? _game) is { } game && !DryRun) Engine.SetMenuTheme(Scan.DocumentsFor(game), Design.Theme.Of(_settings.Theme).MenuColours());
+    }
+
     async Task StartGameAsync(Game g, string? save)
     {
         Process p;
         await BackupsBeforePlay();
         PlayPendingOptions(g);
-        try { p = Launch.Start(g, save); }
-        catch (Exception e) { App.Log(e); await Message(T("The game did not start"), ErrorText(e)); return; }
+        MenuTheme(g);
+        // (the EA app copy waits for the EA app to start it: busy meanwhile, so no install starts under it)
+        _busy = true;
+        try { p = await Task.Run(() => Launch.Start(g, save)); }
+        catch (Exception e) { _busy = false; App.Log(e); await Message(T("The game did not start"), ErrorText(e)); return; }
+        _busy = false;
         var session = _session = new Session(p, Docs);
         _running = true;
         if (_settings.HideWhilePlaying) { TrayShow(T("Apex Launcher · The Sims 3 is running")); AppWindow.Hide(); }
@@ -333,7 +361,8 @@ public sealed partial class MainWindow
         _defaultsFor = null;
         _modsLoaded = false;
         RefreshGame(); // (starts the full check too)
-        if (_step is Welcome or GameStep or WizardSettings && !FirstInstall) Show(Home); // (a first install finished in the administrator window)
+        // (the administrator window's Finish closes it; this window then opens on Home, as Finish does here)
+        if (!FirstInstall) Show(Home);
         else RefreshAll();
         return false;
     }
@@ -579,6 +608,8 @@ public sealed partial class MainWindow
     Button? FindingAction(Health.Item it)
     {
         var f = it.Finding;
+        // (the caches are chosen group by group, file by file, on their own page in Saves)
+        if (f.Suggest == "Clear the game caches") return Button(T(f.Suggest), () => { Show(SavesScreen); SavesGo("caches"); });
         // a suggestion (clear the caches, back up a save): offered under its own name, never run by Fix or Repair
         if (f.CanApply && it.Area == HealthArea.Mods) return Button(T(f.Suggest!), async () =>
         {
@@ -737,8 +768,8 @@ public sealed partial class MainWindow
         var installed = Environment.ProcessPath is { } exe && LauncherInstall.IsInstalledCopy(exe);
         host.Children.Add(Toggle("eye-off", T("Hide while playing"), T("The launcher comes back when the game closes"), _settings.HideWhilePlaying,
             on => { _settings.HideWhilePlaying = on; _settings.Save(); }));
-        host.Children.Add(Toggle("shield-check", T("Apply safe fixes without asking"), T("You can undo them in Repair or remove"), _settings.FixSafeAutomatically,
-            on => { _settings.FixSafeAutomatically = on; _settings.Save(); }));
+        host.Children.Add(Toggle("shield-check", T("Apply safe fixes without asking"), T("You can undo them in Repair or remove"), _settings.FixWithoutAsking,
+            on => { _settings.FixWithoutAsking = on; _settings.Save(); }));
         host.Children.Add(Section(T("Updates")));
         host.Children.Add(Toggle("wand-sparkles", T("Install updates when I press Play"), T("The game starts once they are installed"), _settings.InstallUpdatesOnPlay,
             on => { _settings.InstallUpdatesOnPlay = on; _settings.Save(); }));
@@ -770,13 +801,6 @@ public sealed partial class MainWindow
         choose.Children.Add(Button(T("Choose in the gallery"), () => Show(GalleryScreen)));
         if (chosen) choose.Children.Add(Button(T("Use the newest"), () => { _gal!.HomePicture = null; Gallery.Save(_gal); BuildSettings(); }));
         host.Children.Add(Row("image-plus", T("Gallery picture"), chosen ? T("The one you chose in the gallery") : T("The newest one you took"), choose));
-        int[] heights = [240, 330, 440];
-        var height = new ComboBox { Width = 232 };
-        foreach (var label in new[] { T("Short"), T("Medium"), T("Tall") }) height.Items.Add(label);
-        height.SelectedIndex = Math.Max(0, Array.IndexOf(heights, _settings.HomePictureHeight) is var hi && hi >= 0 ? hi : 1);
-        height.SelectionChanged += (_, _) => { _settings.HomePictureHeight = heights[Math.Max(0, height.SelectedIndex)]; _settings.Save(); };
-        Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(height, T("Picture height"));
-        host.Children.Add(Row("arrow-up-down", T("Picture height"), T("How much of the page the picture takes"), height));
         var strength = new Slider { Minimum = 30, Maximum = 100, StepFrequency = 5, Width = 232, Value = Math.Clamp(_settings.HomePictureStrength, 30, 100) };
         strength.ValueChanged += (_, e) => { _settings.HomePictureStrength = (int)e.NewValue; _settings.Save(); };
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(strength, T("Picture strength"));
@@ -848,7 +872,7 @@ public sealed partial class MainWindow
             }
             HandCursor.On(b);
             Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(b, T(t.Name) + (on ? ", " + T("in use") : ""));
-            b.Click += (_, _) => { _settings.Theme = t.Id; _settings.Save(); Design.DesignSystem.Apply(t.Id); _settingsFocus = "theme"; ThemeChanged(); };
+            b.Click += (_, _) => { _settings.Theme = t.Id; _settings.Save(); Design.DesignSystem.Apply(t.Id); MenuTheme(); _settingsFocus = "theme"; ThemeChanged(); };
             if (on) _themeInUse = b;
             grid.Children.Add(b);
         }
@@ -946,6 +970,23 @@ public sealed partial class MainWindow
     // nothing (true, false, null)
     // Play with updates waiting: each one in a row (its icon, what it is, the version it goes from and to), and the choice of
     // updating first, playing as it is or staying
+    // Play's question when the game's files have safe fixes: true fixes them first, false plays as is, null is Cancel
+    async Task<bool?> FixesFirst(List<Health.Item> fixable)
+    {
+        var body = new StackPanel { Spacing = Design.Space.X4, Width = Design.Dialogs.Medium };
+        body.Children.Add(Design.Dialogs.Words(T("Apex Launcher can fix these before the game starts. Each file keeps a copy you can put back in Repair or remove.")));
+        var list = new StackPanel { Spacing = Design.Space.X2 };
+        foreach (var i in fixable) list.Children.Add(Design.Dialogs.Words("• " + T(i.Finding.Text, i.Finding.Args)));
+        body.Children.Add(list);
+        var r = await ShowDialog(new ContentDialog
+        {
+            Tag = "wrench", Title = T("Fix the game's files first?"), Content = body,
+            PrimaryButtonText = T("Fix and play"), SecondaryButtonText = T("Play without fixing"), CloseButtonText = T("Cancel"),
+            DefaultButton = ContentDialogButton.Primary, XamlRoot = Content.XamlRoot,
+        });
+        return r == ContentDialogResult.Primary ? true : r == ContentDialogResult.Secondary ? false : null;
+    }
+
     async Task<bool?> UpdatesFirst(List<string> ups)
     {
         var body = new StackPanel { Spacing = Design.Space.X4, Width = Design.Dialogs.Medium };
@@ -1179,21 +1220,25 @@ public sealed partial class MainWindow
         Child = new TextBlock { Text = text, FontSize = 11, Foreground = Res(brush) },
     };
 
-    InfoBar Banner(InfoBarSeverity sev, string title, string text, string? action = null, Action? run = null)
+    // closed: what a closable banner runs when its own close button is pressed
+    InfoBar Banner(InfoBarSeverity sev, string title, string text, string? action = null, Action? run = null, Action? closed = null)
     {
-        var bar = new InfoBar { IsClosable = false };
+        var bar = new InfoBar { IsClosable = closed is not null };
+        if (closed is not null) bar.CloseButtonClick += (_, _) => closed();
         SetInfo(bar, sev, title, text, action, run);
         return bar;
     }
 
     // a row of Settings, as Components and Game settings draw theirs: icon, name and what it does, the control on the right
-    static Border Row(string? icon, string title, string detail, UIElement? action)
+    // (more: a link under the line, such as what opens the row's own list)
+    static Border Row(string? icon, string title, string detail, UIElement? action, UIElement? more = null)
     {
         var g = new Grid { ColumnSpacing = 16, VerticalAlignment = VerticalAlignment.Center };
         foreach (var w in new[] { GridLength.Auto, new GridLength(1, GridUnitType.Star), GridLength.Auto }) g.ColumnDefinitions.Add(new ColumnDefinition { Width = w });
         if (icon is not null) g.Children.Add(RowIcon(icon));
         var words = new StackPanel { Spacing = 2, VerticalAlignment = VerticalAlignment.Center, Children = { new TextBlock { Text = title, FontSize = 14, FontWeight = FontWeights.SemiBold, TextWrapping = TextWrapping.Wrap } } };
         if (detail.Length > 0) words.Children.Add(Muted(detail));
+        if (more is not null) words.Children.Add(more);
         Grid.SetColumn(words, 1);
         g.Children.Add(words);
         if (action is FrameworkElement a) { Grid.SetColumn(a, 2); a.VerticalAlignment = VerticalAlignment.Center; g.Children.Add(a); }

@@ -19,6 +19,48 @@ constexpr const char* k407Improved[] = {
     "RTX Remix bridge: the game keeps its graphics settings on every start",
     nullptr};
 
+constexpr const char* k415Improved[] = {
+    "Apex Launcher: the note that the game closed on its own can be closed",
+    nullptr};
+
+constexpr const char* k414Added[] = {
+    "Apex Launcher: an update button beside Play installs updates without starting the game",
+    nullptr};
+
+constexpr const char* k414Improved[] = {
+    "Apex Launcher: the EA app version starts the game without the Sims 3 launcher",
+    "Apex Launcher: Play asks before it fixes the game's files",
+    nullptr};
+
+constexpr const char* k414Fixed[] = {
+    "Shaders: the look list shows again in a narrow menu",
+    "Apex Launcher: closing the administrator window brings you back Home",
+    nullptr};
+
+constexpr const char* k413Added[] = {
+    "Apex Launcher: a Game caches page in Saves, with every cache and its files",
+    "Apex Launcher: custom content in a Sims3Pack is added as mods",
+    "This menu takes the color theme you choose in Apex Launcher",
+    nullptr};
+
+constexpr const char* k413Improved[] = {
+    "Apex Launcher: drag mods into order on the Load order page",
+    "Apex Launcher: a save's Clean panel shows each part, and copies kept inside it",
+    "Tidier pages, lists and controls across this menu, in every language",
+    "Each effect's switch sits beside its page title, and the page stays readable while it is off",
+    "What needs a look outside Apex shows on Overview, instead of a page that comes and goes",
+    "Shaders is out of beta",
+    "The Performance preset updates lamps the Classic way, easier on the graphics card",
+    "Apex Launcher: add mods to a merge from its own folder, with Select all",
+    "Apex Launcher: the Home picture keeps its own shape",
+    nullptr};
+
+constexpr const char* k413Fixed[] = {
+    "The game no longer crashes on a rare vertex format with the RTX Remix bridge",
+    "Apex Launcher: Game settings read a GraphicsRules.sgr edited by hand",
+    "Apex Launcher: colors follow a switch between light and dark everywhere",
+    nullptr};
+
 constexpr const char* k412Added[] = {
     "Apex Launcher: a Load order page shows which mod the game reads first",
     nullptr};
@@ -846,6 +888,9 @@ constexpr const char* k256Improved[] = {"Rendering optimizations are on by defau
 constexpr const char* k256Fixed[] = {"Street lamps outside lots update the lighting after their color changes", nullptr};
 
 constexpr Release kReleases[] = {
+    {"4.1.5", "2026-11-26", nullptr, k415Improved, nullptr, "Apex Launcher 2.3.4: the note that the game closed on its own can be closed"},
+    {"4.1.4", "2026-11-26", k414Added, k414Improved, k414Fixed, "Apex Launcher 2.3.3: update without playing, and the EA app version skips the Sims 3 launcher"},
+    {"4.1.3", "2026-11-26", k413Added, k413Improved, k413Fixed, "Apex Launcher 2.3.2: game caches in Saves, Sims3Packs as mods and your theme in this menu"},
     {"4.1.2", "2026-11-26", k412Added, k412Improved, k412Fixed, "Apex Launcher 2.3.1: load order, a health card on Home and new scrapbook frames"},
     {"4.1.1", "2026-11-25", k411Added, k411Improved, k411Fixed, "Apex Launcher 2.3: a new look, Game settings, backups of your saves and faster merges"},
     {"4.1.0", "2026-11-24", k410Added, nullptr, nullptr, "Apex Radiance Setup becomes Apex Launcher, your home for playing The Sims 3"},
