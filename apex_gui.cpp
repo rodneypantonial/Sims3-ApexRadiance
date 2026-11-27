@@ -1,4 +1,5 @@
 #include "developer_settings.h"
+#include "start_diag.h"
 #include "drag_lite.h"
 #include "outdoor_delta.h"
 #include "object_light_bridge.h"
@@ -5838,6 +5839,7 @@ class GuiClient final : public Overlay::Client {
     bool CanOpen() override { return g_menuAvailable.load(); }
 
     bool OnWindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, LRESULT* result) override {
+        StartDiag::NoteWindowMessage(hwnd, msg, wp, lp); // diagnostics build: speed keys and the game window ([Diag])
         if (Screen::OnWindowMessage(hwnd, msg, wp, lp, result)) return true; // Settings > Display: the window's style and position
         if (msg == WM_CLOSE || msg == WM_DESTROY || (msg == WM_ENDSESSION && wp)) ApexCapture::OnGameClosing(); // a playable video file
         if (msg == WM_KILLFOCUS || (msg == WM_ACTIVATEAPP && !wp)) {

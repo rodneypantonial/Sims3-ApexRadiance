@@ -233,6 +233,7 @@
     <ClCompile Include="framework\hook_guard.cpp" />
     <ClCompile Include="framework\gpu_trace.cpp" />
     <ClCompile Include="framework\load_timing.cpp" />
+    <ClCompile Include="framework\start_diag.cpp" />
     <ClCompile Include="framework\transition_watch.cpp" />
     <ClCompile Include="framework\transition_calls.cpp" />
     <ClCompile Include="features\lot_load_analysis.cpp" />
@@ -456,6 +457,8 @@
     <ClInclude Include="framework\gpu_trace.h" />
     <ClInclude Include="framework\module_lifetime.h" />
     <ClInclude Include="framework\load_timing.h" />
+    <ClInclude Include="framework\start_diag.h" />
+    <ClInclude Include="framework\start_diag_logic.h" />
     <ClInclude Include="framework\transition_watch.h" />
     <ClInclude Include="framework\transition_calls.h" />
     <ClInclude Include="features\room_gather_queue.h" />

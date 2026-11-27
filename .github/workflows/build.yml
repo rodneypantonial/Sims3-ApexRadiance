@@ -2,7 +2,7 @@ name: Windows build and CPU checks
 on:
   pull_request:
   push:
-    branches: [main]
+    branches: [main, 'diag/**']
   workflow_dispatch:
 permissions:
   contents: read

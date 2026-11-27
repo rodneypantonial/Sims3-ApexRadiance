@@ -45,5 +45,7 @@ try {
 # Lazy shader restore: every shader read-back and both UP draws settle a pending restore first
 & python (Join-Path $repo 'tools/deferred_shader_sites_check.py') --self-check; if ($LASTEXITCODE -ne 0) { throw 'Checks failed: deferred_shader_sites self-check' }
 & python (Join-Path $repo 'tools/deferred_shader_sites_check.py') | Tee-Object -FilePath (Join-Path $out 'deferred_shader_sites.txt'); if ($LASTEXITCODE -ne 0) { throw 'Checks failed: deferred_shader_sites' }
+# Start diagnostics: path masking, the package index check for script mods, the change-only logger
+& (Join-Path $repo 'tools/start_diag_test/run.ps1') -OutDir (Join-Path $out 'start_diag') | Tee-Object -FilePath (Join-Path $out 'start_diag.txt')
 & (Join-Path $repo 'tools/shader_refusals_test/run.ps1') -OutDir (Join-Path $out 'shader_refusals') | Tee-Object -FilePath (Join-Path $out 'shader_refusals.txt')
 Write-Output "CPU $Suite suite passed. Gameplay and D3D9/DXVK validation remain separate."

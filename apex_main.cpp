@@ -51,6 +51,7 @@
 #include "platform.h"
 #include "gpu_trace.h"
 #include "edit_in_game_arg.h"
+#include "start_diag.h"
 #include <tlhelp32.h>
 #include <format>
 #include <string>
@@ -247,6 +248,7 @@ DWORD InitBody() {
     LOG_INFO("[Main] Platform: " + Platform::Summary());
     LogEnvironment();
     LogLaunch();
+    StartDiag::Start(g_editArgW); // diagnostics build: [Diag] lines (start_diag.h)
     // Apex's HLSL shaders (every quality and mode) compile now on a background thread, so the render thread never runs
     // D3DCompile: the features only create the shader objects from the bytecode (shader_cache.h).
     ShaderCache::Start();
@@ -312,6 +314,7 @@ DWORD InitBody() {
         HookGuard::Try("Pump: load timing", [] { LoadTiming::Pump(); }); // log lines only ([LoadTiming])
         HookGuard::Try("Pump: transition watch", [] { TransitionWatch::Pump(); });
         HookGuard::Try("Pump: world mode", [] { WatchWorldMode(); }); // [LaunchDiag] lines only
+        HookGuard::Try("Pump: start diagnostics", [] { StartDiag::Pump(); }); // [Diag] lines only
         HookGuard::Try("Pump: transition calls", [] { TransitionCalls::Pump(); });
         HookGuard::Try("Pump: allocator trim", [] { AllocatorTuning::Pump(); }); // allocator_trim
         if constexpr (kDevToolsBuild) if(!kPublicBuild) HookGuard::Try("Pump: lot loading analysis", [] { LotLoadAnalysis::Pump(); });

@@ -17,7 +17,7 @@
 #elif defined(APEX_DEVELOPMENT_BUILD_FLAVOR) || defined(APEX_NUMBERED_TEST_BUILD)
 #define APEX_VERSION_STRING APEX_VERSION_NUMBER "-dev." APEX_STRINGIZE(APEX_DEVELOPMENT_BUILD)
 #else
-#define APEX_VERSION_STRING APEX_VERSION_NUMBER
+#define APEX_VERSION_STRING APEX_VERSION_NUMBER "-diag1127" // diagnostics build (start_diag.h); the file version stays numeric
 #endif
 
 // Visible product name (menu header, credits, feature descriptions, log). Internal identifiers keep "Apex"; files are
