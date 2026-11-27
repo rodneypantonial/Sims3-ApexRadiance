@@ -25,6 +25,7 @@ This page describes the framework as it is in the code. The frozen combined buil
 | Loaded-world gate (menu, start note, screen effects) | [features/world_session.h](../features/world_session.h) | [12](#12-loaded-world-gate-and-start-note) |
 | Report storage | [features/captures.cpp](../features/captures.cpp) | [13](#13-report-storage) |
 | Adding a feature | | [14](#14-how-to-add-a-new-feature) |
+| Apex Launcher (separate program) | [installer/](../installer/) | [16](#16-apex-launcher) |
 
 Game addresses are for `TS3W.exe` Steam 1.67.2.024037 (PE `TimeDateStamp` `0x52DEC247`, image base `0x00400000`, no
 ASLR) unless stated. Other builds are resolved by signature ([engine/game-versions.md](engine/game-versions.md)).
@@ -642,7 +643,7 @@ Every feature ("patch") derives from `ApexPatch` ([framework/patch_base.h](../fr
 ### 5.3 Config file (`ApexRadiance.toml`)
 
 Location: `Documents\Electronic Arts\<localized game folder>\Apex Radiance\` ([framework/apex_paths.h](../framework/apex_paths.h)).
-The localized folder name is resolved from the game executable's string table, with `"The Sims 3"` as fallback.
+When the folder of Windows' language is in use by another edition (it has an `Options.ini`), only the settings files at the top of its `Apex Radiance` folder are copied over; pictures, videos, captures and the shader cache stay. The localized folder name comes from the game executable's string table. The game's language decides it, as `TS3W.exe` does: the first `Locale` under its registry key (`Software\Sims(Steam)` or `Software\Sims`, 32-bit view), Windows' language only when there is none, and English for a language it does not have. A folder that holds `Options.ini` goes first. An `Apex Radiance` folder left in the folder of Windows' language is moved by the ASI at its start, while the game's folder has no `ApexRadiance.toml`: what is missing there, nothing replaced. The launcher never moves it and reads it where the installed ASI does. Sims3SettingsSetter's file is the one saved last of those two folders, Windows' language's when neither has it.
 
 | Table | Contents |
 |---|---|
@@ -707,6 +708,19 @@ process's memory region list, so an address-space exhaustion shows who holds the
 exception on (to the game's filter, else Windows Error Reporting). Both files are overwritten by the next crash. The
 filter uses no heap, only stack buffers and Win32 calls. The pump thread takes the filter back once a second if another
 module replaced it (that one then runs after the report).
+
+**Session trace** ([framework/gpu_trace.h](../framework/gpu_trace.h)): a GPU hang (a driver fault; under the RTX Remix
+bridge its server loses the device, `VK_ERROR_DEVICE_LOST`) freezes the game with no exception, so no crash report is
+written and the log just stops. `ApexRadiance_Trace.bin` is a mapped file (about 16 KB) that keeps the session's start
+time, frame count and its last 256 steps: each HookGuard step, each post-scene effect, each Looks shader, each Present;
+a step repeated at once is one entry with a count; once frames start, only the render thread's steps. Windows writes the
+mapped pages out even when the process is ended from the Task Manager. A normal exit marks the session closed and a
+crash report marks it reported. At the next start a session still marked running (another process) is logged as
+`[Session] The last session ... did not close`: its last 48 steps, the graphics driver's System log events since it
+started (nvlddmkm, amdkmdag, amdwddmg, igfx, igfxn, Display, Kernel-LiveDump), Windows' Application Hang / Error
+events for TS3, and the last errors and warnings of `Game\Bin\NvRemixBridge_d3d9.log` when that log was written during
+that session and not yet over by this start. Offline tools that share Apex's sources do not link `gpu_trace.cpp`: the
+inline hooks check a function pointer that only `Start()` sets.
 
 **Other outputs** in the same folder: `ApexRadiance_Hitches.txt` (profiler writer thread), `ApexRadiance_FrameCapture.txt`,
 `ApexRadiance_LightDiag.txt`, `ApexRadiance_LightProbe.txt` and `LightProbe\`, `ApexRadiance_Censo.txt` and `Censo\`,
@@ -1068,6 +1082,23 @@ thread and adds no game-memory hook or light polling.
 - The conflict guard is an interface only (section 11.4).
 - The loaded-world gate's behaviour across every loading transition (travel, save load, main menu return) needs in-game
   validation; the mock checks and compilation do not show loading screens.
+
+## 16. Apex Launcher
+
+Apex Launcher is a separate Windows program (C#, WinUI 3, .NET 8) under [installer/](../installer/), not part of the
+ASI. It never hooks the game; it meets Apex Radiance only through files:
+
+- It installs `ApexRadiance.asi`, the ASI loader, the renderer and `ts3wrap.exe` into `Game\Bin`, recording them in
+  `Game\Bin\Apex Radiance backup\setup.json` ([components](features/installer.md)).
+- It reads `ApexRadiance.toml` in the Documents folder the installed ASI uses (section 5.3) for the capture folders
+  ([Gallery](features/launcher/gallery.md)) and writes only `[ui] restart_host` and `[screen] fps_limit`, each in a
+  restore point.
+- It reads Apex Radiance's log and crash report for Health's stability timeline ([Health](features/launcher/health.md)).
+- It starts the game's exe itself, optionally with `-worldFile`; the ASI's [Save name fix](features/save-name-fix.md)
+  keeps such a save's name.
+
+Its own structure (screens, Core logic, data folder, elevation) is described in
+[features/launcher/](features/launcher/README.md); build and tests in [workflow.md](workflow.md#apex-launcher).
 
 ## See also
 

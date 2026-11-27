@@ -1,0 +1,135 @@
+using Microsoft.UI.Text;
+using Microsoft.UI.Xaml;
+using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Media;
+using static ApexSetup.Strings;
+
+namespace ApexSetup;
+
+// Installed or portable: asked once on a copy that is neither (a new download, or an old Setup that updated itself into
+// the launcher), and changeable in Settings. LauncherInstall does the work; the window closes when another copy takes over.
+public sealed partial class MainWindow
+{
+    string? _installFolder; // (chosen in place of the default, until it is installed)
+
+    // a folder for the launcher to live in; null when none was picked, or the one picked will not do (said)
+    async Task<string?> PickInstallFolder()
+    {
+        var picker = new Microsoft.Windows.Storage.Pickers.FolderPicker(AppWindow.Id);
+        if (await picker.PickSingleFolderAsync() is not { } f) return null;
+        var dir = LauncherInstall.FolderFor(f.Path);
+        if (string.Equals(dir, Paths.DefaultInstallDir, StringComparison.OrdinalIgnoreCase) || DryRun || await Task.Run(() => LauncherInstall.CanInstallTo(dir))) return dir;
+        await Message(T("This folder can't be used"), T("Apex Launcher can't keep itself up to date in {0} without administrator permission. Choose another folder.", dir));
+        return null;
+    }
+
+    // (a folder chosen before on a drive that is not there now: the default again)
+    string InstallTo => _installFolder ?? (Directory.Exists(Path.GetPathRoot(Paths.InstallDir)) ? Paths.InstallDir : Paths.DefaultInstallDir);
+
+    // another copy takes over
+    void Leave()
+    {
+        _tray?.Dispose();
+        Application.Current.Exit();
+    }
+
+    // where it will be installed, and the way to another folder
+    Border FolderRow()
+    {
+        var detail = new TextBlock { FontSize = 13, Foreground = Res("ApexMutedBrush"), TextWrapping = TextWrapping.Wrap };
+        void Show()
+        {
+            var dir = InstallTo;
+            detail.Text = dir;
+        }
+        Show();
+        var row = Row("folder", T("Folder"), "", Button(T("Change"), async () => { if (await PickInstallFolder() is { } dir) { _installFolder = dir; Show(); } }));
+        ((StackPanel)((Grid)row.Child).Children[1]).Children.Add(detail);
+        return row;
+    }
+
+    // install (this copy starts the installed one and closes) or make it portable (where it is, or in a folder chosen)
+    async Task ApplyInstallMode(bool install, string self, string? folder)
+    {
+        if (DryRun) return; // (a dry run shows the question, changes nothing)
+        if (_busy || _savesBusy) { SayBusy(); return; }
+        try
+        {
+            if (install)
+            {
+                LauncherInstall.Install(self, LauncherInstall.LastingArgs(Environment.GetCommandLineArgs().Skip(1)), folder: folder);
+                Leave();
+                return;
+            }
+            var to = LauncherInstall.MakePortable(self, folder);
+            if (!to.Equals(self, StringComparison.OrdinalIgnoreCase)) { Leave(); return; }
+            BuildSettingsIfShown();
+        }
+        catch (Exception e)
+        {
+            App.Log(e);
+            await Message(install ? T("Apex Launcher could not install itself") : T("Apex Launcher could not switch to portable"),
+                ErrorText(e) + "\n\n" + T("It keeps running from where it is."));
+        }
+    }
+
+    // a long folder as its drive and last two folders ("C:\…\Downloads\Apex"), so it fits one line
+    static string ShortPath(string p)
+    {
+        var parts = p.Split(Path.DirectorySeparatorChar, StringSplitOptions.RemoveEmptyEntries);
+        return parts.Length <= 3 ? p : $"{parts[0]}{Path.DirectorySeparatorChar}\u2026{Path.DirectorySeparatorChar}{parts[^2]}{Path.DirectorySeparatorChar}{parts[^1]}";
+    }
+
+    void BuildSettingsIfShown() { if (_step == SettingsScreen) BuildSettings(); }
+
+    // the end of an install on a copy that is neither installed nor portable: the same two choices as cards, Install first
+    bool _doneInstall = true;
+    void FillDoneChoice()
+    {
+        DoneChoice.Children.Clear();
+        var ask = !Maintenance && !DryRun && LauncherInstall.Mode == LauncherMode.NotChosen && Environment.ProcessPath is not null && _lastInstall.Count > 0;
+        DoneChoice.Visibility = ask ? Visibility.Visible : Visibility.Collapsed;
+        if (!ask) return;
+        var self = Environment.ProcessPath!;
+        // one list, as the install's own lists: keep it on this PC (recommended, in the launcher's own folder) or a single file
+        var choice = ChoiceList([("hard-drive", T("Install on this PC"), T("Recommended: opens from the Start menu and the desktop")),
+            ("folder", T("Use as a single file"), T("Nothing is installed, and you can move it to any folder"))], _doneInstall ? 0 : 1,
+            k => { _doneInstall = k == 0; FillDoneChoice(); UpdateFooter(); });
+        choice.Margin = new Thickness(0, 10, 0, 0);
+        DoneChoice.Children.Add(choice);
+        if (_doneInstall) DoneChoice.Children.Add(FolderRow());
+    }
+
+    // Settings: this copy, installed or not, and the way to switch
+    Border InstallModeRow()
+    {
+        var self = Environment.ProcessPath ?? "";
+        var mode = LauncherInstall.Mode;
+        (string, FrameworkElement) row = mode switch
+        {
+            LauncherMode.Installed => (T("Installed in {0}", ShortPath(Paths.InstallDir)), Pair(Button(T("Move…"), async () =>
+            {
+                if (await PickInstallFolder() is not { } dir || string.Equals(dir, Paths.InstallDir, StringComparison.OrdinalIgnoreCase)) return;
+                if (await Confirm(T("Move Apex Launcher?"), T("It moves to {0}. Your settings stay and the shortcuts follow.", dir), T("Move it")))
+                    await ApplyInstallMode(true, self, dir);
+            }), Button(T("Use without installing"), async () =>
+            {
+                var picker = new Microsoft.Windows.Storage.Pickers.FolderPicker(AppWindow.Id);
+                if (await picker.PickSingleFolderAsync() is not { } f) return;
+                if (await Confirm(T("Use without installing?"), T("Apex Launcher moves to {0} and leaves the Start menu, the desktop and Installed apps. Your settings stay.", f.Path), T("Move it")))
+                    await ApplyInstallMode(false, self, f.Path);
+            }))),
+            LauncherMode.Portable => (T("Not installed: running from {0}", ShortPath(Path.GetDirectoryName(self) ?? self)), Button(T("Install it"), () => UpgradeShow(Array.IndexOf(UpgradeSteps, T("Where to keep it"))))),
+            _ => (T("Running from {0}, not installed yet", ShortPath(Path.GetDirectoryName(self) ?? self)), Button(T("Choose"), () => UpgradeShow(0))),
+        };
+        var (text, action) = row;
+        return Row("hard-drive", T("Apex Launcher on this PC"), text, DryRun ? null : action);
+
+        static FrameworkElement Pair(params Button[] buttons)
+        {
+            var s = new StackPanel { Orientation = Orientation.Horizontal, Spacing = Design.Space.X2 };
+            foreach (var b in buttons) s.Children.Add(b);
+            return s;
+        }
+    }
+}

@@ -1,6 +1,12 @@
-# Apex Radiance Setup
+# Apex Launcher (Apex Radiance Setup)
 
-A Windows installer (WinUI 3, one self-contained exe) for Apex Radiance and the mods it works with. It finds The Sims 3
+Apex Launcher (`ApexLauncher.exe`; Apex Radiance Setup up to 1.2.x) is a Windows program (WinUI 3, one
+self-contained exe) that installs Apex Radiance and the mods it works with and starts the game: Home and Play, Health,
+Mods, Worlds, Saves, a Gallery of pictures and videos, and What's new. The screens are described in
+[docs/features/launcher/README.md](../docs/features/launcher/README.md); this page covers the installing part
+(the *Components* screen) and the build.
+
+The installing part is the installer for Apex Radiance and the mods it works with. It finds The Sims 3
 (Steam 1.67.2 `TS3W.exe`, EA app 1.69.47 `TS3.exe`, or a folder the player picks), shows what is installed, and applies
 only what differs from the player's choice.
 
@@ -9,11 +15,11 @@ only what differs from the player's choice.
 | Part | Source | Where |
 |---|---|---|
 | Apex Radiance (required) | `loinyx/Sims3-ApexRadiance` latest release | `Game\Bin\ApexRadiance.asi` |
-| Restart host (experimental, off by default; Setup 1.1.5) | `ts3wrap.exe` of the same Apex release (its own asset in 3.1.3 and 3.1.4, inside the manual-install zip from 3.1.5) | `Game\Bin\ts3wrap.exe`, and `[ui] restart_host = true` in `Documents\...\Apex Radiance\ApexRadiance.toml` |
+| TS3Wrap, the restart host (Setup 1.1.5; on by default in a new install from Apex Launcher 2.0) | `ts3wrap.exe` of the same Apex release (its own asset in 3.1.3 and 3.1.4, inside the manual-install zip from 3.1.5) | `Game\Bin\ts3wrap.exe`, and `[ui] restart_host = true` in `Documents\...\Apex Radiance\ApexRadiance.toml` |
 | Renderer: DXVK, RTX Remix bridge (recommended and chosen by default on a first install, DXVK when the card cannot run it; an installed renderer is kept; DXVK and the bridge only with a Vulkan 1.3 graphics card whose driver has the extensions DXVK requires, asked from `vulkan-1.dll`), or the game's own Direct3D 9 | `doitsujin/dxvk` (x32 `d3d9.dll`); the bridge zip of the Apex release | `Game\Bin` (`client.targetProcess` set to the game's exe) |
 | Sims3SettingsSetter | `sims3fiend/Sims3SettingsSetter` | `Game\Bin` |
 | Sims 3 Modernization | `rodneypantonial/sims3-modernization` (Steam or EA zip by edition; when the latest release lacks the edition's zip, the newest of the last 20 that has it, with its own `ts3fixes.package`, and no update is offered to a release without it). Channel *Stable* (default) or *Experimental*: the newest `-exp.` prerelease with the edition's zip, else stable; a channel change copies `ts3native.ini` to `ts3native.ini.<left channel>.bak` and writes the channel's | `ts3native` in `Game\Bin`, `ts3fixes.package` in `Mods\Packages` |
-| MonoPatcher (no longer offered since Setup 1.1.3: no mod Setup installs needs it; an installed copy can still be kept, updated or removed) | `LazyDuchess/MonoPatcher` (its bundled loader is left out) | `MonoPatcher.asi` in `Game\Bin`, its package in `Mods\Packages\MonoPatcher` |
+| MonoPatcher (off until turned on: only some script mods need it) | `LazyDuchess/MonoPatcher` (its bundled loader is left out) | `MonoPatcher.asi` in `Game\Bin`, its package in `Mods\Packages\MonoPatcher` |
 | Sims 3 Performance Patch | Nexus Mods only (needs the player's account): Setup opens its page, watches the Downloads folder and installs the `.zip` (or a chosen `.asi`) when the download finishes | `Game\Bin` |
 | Ultimate ASI Loader, only when no loader is found | `ThirteenAG/Ultimate-ASI-Loader` (`dinput8.dll` as `wininet.dll`) | `Game\Bin` |
 
@@ -86,12 +92,13 @@ run at the end of every install, or with *Fix all now* on the game page.
 |---|---|
 | `S3SSApex.asi`, an old build with Apex inside S3SS, or a second `ApexRadiance.asi` in `scripts\` or `plugins\` | Moved to the backup folder |
 | Two ASI loaders | All but the first moved to the backup folder |
-| Sims3Performance next to `ts3native` with `ShortWaitSpin` or `ThreadStackDiet` above 0 | Both set to 0, copy as `Sims3Performance.ini.apex-backup` |
+| Sims3Performance next to S3SS with `ShortWaitSpin` above 0 (both patch the same wait calls) | Offered as *Apply*, and set when the launcher installs Sims3Performance: `ShortWaitSpin` to 0, copy as `Sims3Performance.ini.apex-backup` |
+| Faster text lookups on in `ApexRadiance.toml` while `CCStringMerge_Strings.package`, Sims3Performance's `LocalizedStringCache` or `StblBucketLayoutTuning` (missing = on), or the module the last game's stand-down named changes the same code | Reported with the file and setting; nothing changed |
 | S3SS uncompressed lot or Sim textures under the bridge | `enabled = false`, copy as `S3SS.toml.apex-backup` |
 | `client.targetProcess` in a `bridge.conf` not the game's exe | Set to the exe |
 | The bridge's `dxvk.conf` without the TS3 profile, `d3d9.countLosableResources = False` before its first `[exe]` section | Wrong values set, missing lines added at the top |
 | `.package` files in `Mods\Packages` (up to 3 folders deep) without `Resource.cfg` | `Resource.cfg` created |
-| A `Resource.cfg` that does not read `ts3fixes.package` or MonoPatcher's package | The `Packages` folder lines added, copy as `Resource.cfg.apex-backup` |
+| A `Resource.cfg` that does not read `ts3fixes.package` or MonoPatcher's package | The `Packages` folder lines added under `Priority 500`, copy as `Resource.cfg.apex-backup`; a package those lines do not reach either is told to move to `Mods\Packages` |
 | Smooth Patch's `TS3Patch.asi` next to S3SS (same game code) | Moved to the backup folder |
 | `ts3native` built for the other edition | Reported; turning Sims 3 Modernization on installs the right one |
 | A Steam build of simler90 or XCAS on the EA app (or the reverse), NRaas ErrorTrap on the EA app, simler90 next to StoryProgression, MonoPatcher without the VC++ x86 runtime | Reported with a link |
@@ -136,8 +143,9 @@ nothing. `APEX_SETUP_FAKE_AMD=<supported>|<on>` (for example `1|0`, or `none` fo
 
 The tests run the engine on a fake `Game\Bin` and Documents folder in `%TEMP%` with local files (no network, no game).
 For a manual run against a fake game: start the exe with the game folder as its argument and `APEX_SETUP_DOCUMENTS` set
-to a fake Documents folder. The exe asks for administrator rights (`Game\Bin` is usually under Program Files). Errors are
-logged to `%LOCALAPPDATA%\Apex Radiance Setup\ApexRadianceSetup.log`.
+to a fake Documents folder. The launcher runs without administrator rights and asks for them only when a change writes
+where it cannot ([elevation](../docs/features/launcher/elevation.md)). Errors are logged to
+`%LOCALAPPDATA%\Apex Launcher\ApexLauncher.log`.
 
 The UI smoke run drives the published exe through UI Automation in a dry run and checks after every step that Setup still
 runs and that its log has nothing new but the dry run's refusals: every switch, the renderer cards, the frame limit list
@@ -146,7 +154,7 @@ driver change and a component change), the Done screen, every action of Repair o
 folder, the licences, all 21 languages, a narrow and a wide window. It puts Setup's language choice back.
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File installer\ui-smoke\Run-UiSmoke.ps1 -Exe installer\publish\ApexRadianceSetup.exe `
+powershell -ExecutionPolicy Bypass -File installer\ui-smoke\Run-UiSmoke.ps1 -Exe installer\publish\ApexLauncher.exe `
     -Game "C:\Program Files (x86)\Steam\steamapps\common\The Sims 3" -FakeNv "NVIDIA GeForce RTX 4070|62124|0|" -FakeAmd "0|0" -Runs 3
 ```
 

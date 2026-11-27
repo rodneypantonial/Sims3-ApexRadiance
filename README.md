@@ -491,9 +491,9 @@ In tested configurations, this can leave approximately **600–800 MB more addre
 
 ### Recommended renderer
 
-Starting with **Apex Radiance Setup 1.1.7**, the RTX Remix Bridge is selected by default for a first installation. If the graphics driver cannot run the bridge, Setup selects DXVK instead.
+Apex Launcher (and Apex Radiance Setup from 1.1.7) selects the RTX Remix Bridge by default for a first installation. If the graphics driver cannot run the bridge, it selects DXVK instead.
 
-When updating an existing installation, Setup keeps the renderer already selected.
+When updating an existing installation, the launcher keeps the renderer already selected.
 
 Apex detects the bridge automatically. You can check its status under **Settings → Compatibility**, where it appears as *RTX Remix bridge: Installed*.
 
@@ -605,16 +605,16 @@ You can select a language in Settings or let the menu follow your Windows langua
 - An ASI loader in the game's `Game\Bin` folder, such as [Ultimate ASI Loader](https://github.com/ThirteenAG/Ultimate-ASI-Loader).
 - A DirectX 9 Shader Model 3.0-capable graphics card.
 
-### Recommended: Apex Radiance Setup
+### Recommended: Apex Launcher
 
 <div align="center">
   <table width="100%">
     <tr>
       <td align="center" style="padding: 18px;">
-        <h3>Apex Radiance Setup</h3>
-        <p>Install, update, check, repair and manage Apex components in one place.</p>
+        <h3>Apex Launcher</h3>
+        <p>Install and update Apex Radiance, then start the game from one place: Play, health checks, mods, saves and your pictures.</p>
         <a href="https://github.com/loinyx/Sims3-ApexRadiance/releases/latest">
-          <img src="https://img.shields.io/badge/DOWNLOAD%20SETUP-2EA44F?style=for-the-badge" alt="Download Setup">
+          <img src="https://img.shields.io/badge/DOWNLOAD%20APEX%20LAUNCHER-2EA44F?style=for-the-badge" alt="Download Apex Launcher">
         </a>
       </td>
     </tr>
@@ -622,19 +622,20 @@ You can select a language in Settings or let the menu follow your Windows langua
 </div>
 
 1. Close the game and launcher.
-2. Download **ApexRadianceSetup.exe** from the [latest release](https://github.com/loinyx/Sims3-ApexRadiance/releases/latest).
-3. Run Setup.
-4. Select your game installation and choose the components you want.
-5. Click **Install**.
+2. Download **ApexLauncher.exe** from the [latest release](https://github.com/loinyx/Sims3-ApexRadiance/releases/latest).
+3. Run it, select your game installation and choose the components you want.
+4. Click **Install**. When it asks how to use it, keep **Install (recommended)**: it adds itself to the Start menu, the desktop and *Installed apps*.
 
-Setup can install, update, check, repair and remove Apex Radiance components. It also creates restore points for files it replaces and can restore those files later.
+From then on, start the game with **Play** in Apex Launcher. It installs updates when you press Play, checks the game's health, switches mods on and off, plays straight into a save and keeps a restore point before every change. It runs without administrator rights and asks only when a change to the game folder needs them.
 
-Setup updates itself. If an older version reports *asset not found*, download the latest Setup again.
+Already using **Apex Radiance Setup**? Open it: it updates itself into Apex Launcher and keeps your games, language and settings. If it reports *asset not found*, download `ApexLauncher.exe` from the latest release instead.
 
-For a first installation, Setup selects the **RTX Remix Bridge** when the graphics driver supports it; otherwise it selects **DXVK**. Existing installations retain their selected renderer when updated.
+To remove everything: Windows *Settings › Apps › Installed apps › Apex Launcher › Uninstall*. Your saves and your own mods stay.
+
+For a first installation, the launcher selects the **RTX Remix Bridge** when the graphics driver supports it; otherwise it selects **DXVK**. Existing installations keep their renderer when updated.
 
 <div align="right">
-  <a href="docs/features/installer.md"><strong>Read the Setup documentation →</strong></a>
+  <a href="docs/features/launcher/README.md"><strong>Read the Apex Launcher documentation →</strong></a>
 </div>
 
 ### Manual installation
@@ -711,7 +712,7 @@ The [documentation index](docs/README.md) covers feature settings, compatibility
 
 - [Feature documentation](docs/README.md)
 - [Release notes](docs/releases/README.md)
-- [Installation guide](docs/features/installer.md)
+- [Apex Launcher](docs/features/launcher/README.md) and its [components and install](docs/features/installer.md)
 - [RTX Remix Bridge](docs/features/rtx-remix-bridge.md)
 - [Looks and Shaders](docs/features/looks.md)
 - [Screenshots and Video](docs/features/screenshots-and-video.md)
@@ -741,7 +742,7 @@ Apex Radiance builds on the work, research and tools of many people and projects
 - **Lot Streaming and daytime bloom fixes** — research and code by [@idavidveiga](https://github.com/idavidveiga).
 - **Looks and Capture** — contributed by [@ModestPixels](https://github.com/ModestPixels).
 - **Restart Host (`ts3wrap.exe`)** — adapted from Dalexlol's wrapper in [sims3-modernization](https://github.com/rodneypantonial/sims3-modernization).
-- **Scene update safety** — contribution by [@rodneypantonial](https://github.com/rodneypantonial) in [PR #38](https://github.com/loinyx/Sims3-ApexRadiance/pull/38).
+- **Contributions by [@rodneypantonial](https://github.com/rodneypantonial)** (Sims 3 Modernization) — scene update safety ([#38](https://github.com/loinyx/Sims3-ApexRadiance/pull/38)); *Fewer mouse picks when still*, *Frame deadline while moving* and the shared room solve time in Performance; *Fewer directions when far*, *Steady direction count*, *Fewer directions in the open*, *Smooth flat surfaces*, *Edge-aware smoothing* and *Refine while the camera is still* in Ambient Occlusion; RTX Remix bridge fixes and its rewind mode; Setup's experimental Sims 3 Modernization channel; the mod conflict scan; start-up and routing fixes, developer benchmarks and CI builds.
 
 ### Shader authors & projects
 

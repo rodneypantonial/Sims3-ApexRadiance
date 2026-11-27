@@ -21,6 +21,7 @@
 #include "apex_version.h"
 #include "address_space.h"
 #include "restart_host.h"
+#include "oop_client.h"
 #include "va_ledger.h"
 #include "dev_switches.h"
 #include "game_alloc_categories.h"
@@ -30,6 +31,7 @@
 #include "conflict_guard.h"
 #include "crash_report.h"
 #include "delegate_sig_fix.h"
+#include "save_name_fix.h"
 #include "bone_index_guard.h"
 #include "pick_readback.h"
 #include "readback_bench.h"
@@ -48,6 +50,7 @@
 #include "s3ss_detect.h"
 #include "shader_cache.h"
 #include "platform.h"
+#include "gpu_trace.h"
 #include <format>
 #include <string>
 
@@ -174,6 +177,7 @@ DWORD InitBody() {
     // Apex's HLSL shaders (every quality and mode) compile now on a background thread, so the render thread never runs
     // D3DCompile: the features only create the shader objects from the bytecode (shader_cache.h).
     ShaderCache::Start();
+    SaveNameFix::Start(); // game fix, only with -worldFile on the command line: the save keeps its name (save_name_fix.h)
 
 
     S3SSDetect::Scan();
@@ -215,6 +219,7 @@ DWORD InitBody() {
         AllocatorTuning::Install(); // allocator_trim / allocator_top_down (the allocator exists by now)
         StreamArena::Install();     // stream_arena (dev switch, off unless set)
         DelegateSigFix::Install();  // game fix, always on: zero-parameter script delegates (delegate_sig_fix.h)
+        OopClient::EnablePlugins(); // [oop] plugins: none by default; listed for the host before it starts
         RestartHost::Start();       // [ui] restart_host: ts3wrap.exe, off by default
         BoneIndexGuard::Install(); // game fix, always on: bone indices past a Sim part's bone list (bone_index_guard.h)
         PickReadback::Install();   // always on: the mouse pick read back without the GPU wait (pick_readback.h)
@@ -256,6 +261,7 @@ DWORD InitBody() {
 // 07/10, players' Runtime Error: a C++ exception left in start-up or in the pump ends this thread (noted), never the game
 DWORD WINAPI InitThread(LPVOID) {
     CrashReport::ThreadStart();
+    GpuTrace::Start(); // reports a last session that did not close (a GPU hang), then keeps this one's last steps
     try {
         return InitBody();
     } catch (...) {
@@ -303,6 +309,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
         break;
     }
     case DLL_PROCESS_DETACH:
+        GpuTrace::Closed(); // (a write to the mapped trace only)
         // Successful attachment is pinned: no live unload. At process exit do not
         // acquire other threads' locks or recreate/release graphics resources.
         break;

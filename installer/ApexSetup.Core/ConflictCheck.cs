@@ -1,0 +1,139 @@
+using System.Text.Json;
+using System.Text.RegularExpressions;
+
+namespace ApexSetup;
+
+public sealed record ConflictEntry(string Kind, string Text, string[] Parties, string? Winner)
+{
+    public string[] Labels { get; init; } = []; // each party's file, as the scan names it
+    public string[] Values { get; init; } = []; // what differs: name, value in use, the other's value
+}
+public sealed record OverlapEntry(string Label, string Risk, string[] Parties);
+public sealed record DuplicateEntry(string[] Parties, string Text);
+public sealed record ConflictResult(string Fingerprint, List<ConflictEntry> Conflicts, List<OverlapEntry> Overlaps, List<DuplicateEntry> Duplicates, bool NeedsSevenZip);
+
+// ModConflicts' scan as a mod check. CONFLICT: a ModConflict with its level; the ones that count and are not ignored are a
+// Warning tied to every party's files. WARNING (two mods in one behaviour area) shows nowhere: on a real Mods folder every
+// area lists a dozen mods that work together. INFO duplicate copies: Duplicates. The result is kept in
+// %LOCALAPPDATA%\Apex Launcher\conflicts.json with the size and time of every mod file: while none changed it is reused
+// as is. A change rescans everything, since a conflict is between files. The scan runs at most Timeout; one that takes
+// longer finishes in the background and is kept for the next check. Not in ModChecks.All: the Mods and Game screens run
+// those on the UI thread, and a first scan of a large Mods folder takes seconds, so Health.Gather runs it when asked.
+public sealed class ConflictCheck : IModCheck
+{
+    public string Name => "conflicts";
+    public bool Offline { get; init; }                                   // no hook-table download
+    public TimeSpan Timeout { get; init; } = TimeSpan.FromSeconds(60);
+    public Func<ModConflicts.Options, ModConflicts.Report> Scan { get; init; } = ModConflicts.Scan; // (tests)
+    public int Scans { get; private set; }                               // scans run (tests: none when the cache is reused)
+    public ConflictResult? Last { get; private set; }                    // null: the last check did not finish
+    public ICollection<string> Ignored { get; init; } = [];              // ModConflict.Id of the ones the player ignored
+    public IReadOnlyList<ModConflict> Found { get; private set; } = [];  // the last check's, ignored ones too
+
+    static string CacheFile => Path.Combine(Paths.Data, "conflicts.json");
+    static readonly object Gate = new();
+    static readonly Regex Winner = new(@"likely winner: ([^;]+)");
+
+    // the identical copies the last check found (two packages or assemblies with the same bytes: one can go)
+    public List<DuplicateEntry> Duplicates => Last?.Duplicates ?? [];
+
+    // (Rules goes up when the scan's rules change, so a result kept from older rules is scanned again)
+    const int Rules = 9;
+    public static string Fingerprint(IEnumerable<ModFile> mods) => $"rules {Rules}\n" +
+        string.Join("\n", mods.Where(Scanned).OrderBy(m => m.Path, StringComparer.OrdinalIgnoreCase)
+            .Select(m => $"{m.Path}|{m.Size}|{(File.Exists(m.Path) ? File.GetLastWriteTimeUtc(m.Path).Ticks : 0)}"));
+
+    // what the scan reads: the switched-on packages under Mods and the ASIs
+    static bool Scanned(ModFile m) => m.Enabled && (m.FileType == "asi" || m.FileType == "package" && m.Rel.StartsWith("Mods", StringComparison.OrdinalIgnoreCase));
+
+    // Resource.cfg says which packages load and which comes first (where the scan looks for it)
+    static string Order(string docs) =>
+        new[] { Path.Combine(docs, "Mods", "Resource.cfg"), Path.Combine(docs, "Resource.cfg") }.Select(f => new FileInfo(f)).FirstOrDefault(f => f.Exists) is { } cfg
+            ? $"\n{cfg.FullName}|{cfg.Length}|{cfg.LastWriteTimeUtc.Ticks}" : "";
+
+    public ConflictResult? Result(IReadOnlyList<ModFile> mods, Game game, string docs)
+    {
+        ConflictResult? r = null;
+        try { return r = Read(mods, game, docs); }
+        finally { Last = r; }
+    }
+
+    ConflictResult? Read(IReadOnlyList<ModFile> mods, Game game, string docs)
+    {
+        var fp = Fingerprint(mods) + Order(docs);
+        if (Load() is { } cached && cached.Fingerprint == fp) return cached;
+        // one scan at a time per set of mods: a second check while it runs (Play checks twice) waits on that one
+        Task<ConflictResult> scan;
+        lock (Gate)
+        {
+            if (Running is { } run && run.Fp == fp && !run.Scan.IsCompleted) scan = run.Scan;
+            else { scan = Start(fp, game, docs); Running = (fp, scan); }
+        }
+        if (!scan.Wait(Timeout)) { Engine.Log(new TimeoutException($"Mod conflict scan over {Timeout.TotalSeconds:0} s; kept for the next check when it ends")); return null; }
+        return scan.Result;
+    }
+
+    static (string Fp, Task<ConflictResult> Scan)? Running;
+
+    Task<ConflictResult> Start(string fp, Game game, string docs)
+    {
+        Scans++;
+        var o = new ModConflicts.Options
+        {
+            Roots = Directory.Exists(Path.Combine(docs, "Mods")) ? [Path.Combine(docs, "Mods")] : [], LoadedOnly = true,
+            Bin = game.Bin, Game = game.Root,
+            Hooks = ModConflicts.HookTable.Load(Offline, Path.Combine(Paths.Data, "hook-table.csv")),
+        };
+        var scan = Task.Run(() =>
+        {
+            var r = Scan(o);
+            var result = new ConflictResult(fp,
+                r.Conflicts.Select(c => new ConflictEntry(c.Kind, c.Text, c.Parties, Winner.Match(c.Text) is { Success: true } w ? Path.GetFileNameWithoutExtension(w.Groups[1].Value.Trim()) : null) { Labels = c.Labels, Values = c.Values }).ToList(),
+                r.Warnings.Select(w => new OverlapEntry(w.Label, w.Risk, w.Parties.Select(p => p.Name).ToArray())).ToList(),
+                r.Info.Where(i => i.Text.StartsWith("duplicate copy", StringComparison.Ordinal)).Select(i => new DuplicateEntry(i.Party.Split(" + "), i.Text)).ToList(),
+                r.NeedsSevenZip);
+            Save(result);
+            return result;
+        });
+        return scan;
+    }
+
+    public IEnumerable<ModFinding> Check(IReadOnlyList<ModFile> mods, Game game, string docs)
+    {
+        if (Result(mods, game, docs) is not { } r) return [];
+        string FileOf(string label) => Path.GetFullPath(label.StartsWith("Bin/", StringComparison.Ordinal) ? Path.Combine(game.Bin, label[4..]) : Path.Combine(docs, label));
+        var f = new List<ModFinding>();
+        var found = new List<ModConflict>();
+        // (ccmerged.package, the game's own merged store lists, is the player's choice to keep in Mods: never a conflict)
+        static bool Ccmerged(string party) => party.Equals("ccmerged", StringComparison.OrdinalIgnoreCase);
+        foreach (var c in r.Conflicts.Where(c => !c.Parties.Any(Ccmerged)))
+        {
+            var m = ModConflict.Of(c, c.Labels.Select(FileOf).ToArray());
+            // (the same mods again: the worse of the two stays. Two versions of a mod share an id, each against the others on its own)
+            if (found.FindIndex(x => x.Id == m.Id && x.Files.ToHashSet(StringComparer.OrdinalIgnoreCase).SetEquals(m.Files)) is >= 0 and var at)
+            {
+                if (m.Level >= found[at].Level) continue;
+                if (found[at].Finding is { } milder) f.RemoveAll(x => ReferenceEquals(x.Finding, milder));
+                found[at] = m;
+            }
+            else found.Add(m);
+            if (m.Finding is { } warn && !Ignored.Contains(m.Id)) f.Add(new(warn, m.Files));
+        }
+        Found = found.OrderBy(x => x.Level).ToList();
+        if (r.NeedsSevenZip)
+            f.Add(new(new Finding(Severity.Info, "Some mod archives couldn't be read. Install 7-Zip so the conflict check can read them too.", []), []));
+        return f;
+    }
+
+    static ConflictResult? Load()
+    {
+        try { return File.Exists(CacheFile) ? JsonSerializer.Deserialize(File.ReadAllText(CacheFile), SetupJson.Default.ConflictResult) : null; }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException or JsonException) { return null; }
+    }
+
+    static void Save(ConflictResult r)
+    {
+        try { Directory.CreateDirectory(Paths.Data); var text = JsonSerializer.Serialize(r, SetupJson.Default.ConflictResult); lock (Gate) Fs.Retry(() => Fs.WriteAtomic(CacheFile, text)); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { Engine.Log(e); }
+    }
+}

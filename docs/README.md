@@ -30,8 +30,9 @@ Per-lot loading events (Released in 2.14.0, developer mode only) are described i
 | Document | Covers |
 |---|---|
 | [architecture.md](architecture.md) | Loading, D3D9 hooks, hook registry, post-scene chain, INTZ depth share, patch system, configuration, logger, threads |
-| [workflow.md](workflow.md) | Build, install, testing harnesses, diagnosis with captures, release process, repository skills |
+| [workflow.md](workflow.md) | Build (the ASI and [Apex Launcher](workflow.md#apex-launcher)), install, testing harnesses, diagnosis with captures, release process, repository skills |
 | [ui.md](ui.md) | The Violet menu: pages, cards, widgets, shortcuts, profiles, notices, languages |
+| [features/launcher/](features/launcher/README.md), [launcher-design.md](launcher-design.md) | Apex Launcher, the separate Windows program: its screens, data files, elevation and updates; its design system |
 | [DOCUMENTATION-STANDARD.md](DOCUMENTATION-STANDARD.md) | How to write and update these documents ([templates](templates/)) |
 
 ## Features
@@ -72,7 +73,7 @@ Per-lot loading events (Released in 2.14.0, developer mode only) are described i
 | [Depth Blur](features/depth-blur.md): depth of field | Released |
 | [Banding Fix](features/banding-fix.md): dither against colour banding | Experimental (released in 2.2.0); Released in 2.16.0: High-precision scene on by default, redesigned card; Released in 3.2.3: frames without a 3D scene drawn straight into the back buffer |
 | [Looks](features/looks.md): runs a ReShade or GShade preset (.ini) inside Apex, 17 shaders built in plus the player's own .fx files and the packs of ReShade's official list, downloaded on a click; its own page, Image > Shaders (tabs Look and Library) | Released in 4.0.0, Experimental |
-| [Screenshots and video](features/screenshots-and-video.md): screenshots and MP4 or MKV videos with Apex's effects, its own page, Image > Capture (tabs Screenshots and Video) | Released in 4.0.0 |
+| [Screenshots and video](features/screenshots-and-video.md): screenshots and MP4 or MKV videos with Apex's effects up to 4K, its own page, Image > Capture (tabs Screenshots and Video) | Released in 4.0.0; 4K: Released in 4.0.13 |
 
 ### Performance
 
@@ -84,8 +85,9 @@ Per-lot loading events (Released in 2.14.0, developer mode only) are described i
 | [Faster memory handling](features/performance/fast-memory.md): allocator spin and background release | Released in 2.4.0; Released in 2.14.0: allocator trim and top-down large blocks |
 | [Lot Streaming](features/performance/lot-streaming.md): lot detail farther away, stable detailed lots, a pause in map view (idavidveiga), off by default | Experimental (released in 2.7.0); Released in 2.16.2: shared lot build time, detailed-lot hysteresis; Released in 3.1.2: detailed lots ranked at half their distance; Removed in 3.1.2: Smooth lot streaming, Spread lot objects while loading, Maximum detailed lots ([removed features](removed-features.md#lot-streaming-parts)) |
 | [Display](features/display.md): window mode, resolution, frame-rate limiter (System > Display) | Released in 3.1.0; Released in 3.1.1: resolution through the game's own change on every build, the game's fullscreen as Borderless under the bridge; Released in 3.1.2: Turn off G-SYNC; removed in 3.2.3 |
-| [RTX Remix bridge](features/rtx-remix-bridge.md): the renderer (DXVK) in its own 64-bit process, about 600 to 800 MB more free memory in the game | Released in 3.0.0 (separate download); its `dxvk.conf` fix for exclusive fullscreen published again after 3.0.0; Released in 3.1.0: install guide, uncompressed-textures card, Fullscreen as Borderless under the bridge; Released in 3.1.1: bridge patches 0011 to 0013, bridge logs in captures, its own Nexus file; Released in 3.1.2: no forced 16x anisotropic filtering; Released in 3.2.2: Turbo Simulation Engine no longer freezes the game at start under the bridge |
+| [RTX Remix bridge](features/rtx-remix-bridge.md): the renderer (DXVK) in its own 64-bit process, about 600 to 800 MB more free memory in the game | Released in 3.0.0 (separate download); its `dxvk.conf` fix for exclusive fullscreen published again after 3.0.0; Released in 3.1.0: install guide, uncompressed-textures card, Fullscreen as Borderless under the bridge; Released in 3.1.1: bridge patches 0011 to 0013, bridge logs in captures, its own Nexus file; Released in 3.1.2: no forced 16x anisotropic filtering; Released in 3.2.2: Turbo Simulation Engine no longer freezes the game at start under the bridge; Released in 4.0.8: no crash at start with Turbo |
 | [Delegate signature fix](features/delegate-signature-fix.md): no simulator-thread crash when a script callback without arguments runs (always on) | Released in 3.1.1 |
+| [Save name fix](features/save-name-fix.md): a save opened from the launcher or the restart host keeps its name, so Save As shows (always on) | Released in 4.1.1 |
 | [Bone index guard](features/bone-index-guard.md): no crash when a Sim part names a bone it does not have (always on) | Released in 3.1.3 |
 
 ### Reports and diagnostics
@@ -102,7 +104,7 @@ Per-lot loading events (Released in 2.14.0, developer mode only) are described i
 
 | Feature | Status |
 |---|---|
-| [Apex Radiance Setup](features/installer.md): an optional Windows program that installs, updates, checks, repairs and removes Apex Radiance and the mods it works with | Released in 3.1.1; Released in 3.1.2: a welcome for first installs, updates in their own card, renderer cards, the RTX Remix bridge labelled experimental and offered only with Vulkan 1.3; Released in 3.2.1: DXVK and the bridge offered only when the graphics driver has what DXVK needs |
+| [Apex Launcher](features/launcher/README.md) (Apex Radiance Setup up to 1.2.x): an optional Windows program that installs, updates, checks, repairs and removes Apex Radiance and the mods it works with, and starts the game with its mods, saves and pictures. Pages: [Home and Play](features/launcher/home-and-play.md), [Components, install and update](features/installer.md), [Game settings](features/launcher/game-settings.md), [Mods](features/launcher/mods.md), [Mod tools](features/launcher/mod-tools.md), [Load order and conflicts](features/launcher/load-order-and-conflicts.md), [Saves and backups](features/launcher/saves-and-backups.md), [Gallery](features/launcher/gallery.md), [Health](features/launcher/health.md), [Settings and What's new](features/launcher/settings.md), [Languages](features/launcher/languages.md), [Uninstall](features/launcher/uninstall.md), [Data folders and files](features/launcher/data-and-files.md), [Elevation](features/launcher/elevation.md), [Self-update](features/launcher/self-update.md), [design system](launcher-design.md) | Released in 3.1.1 (Setup); Released in 4.1.0: Apex Launcher 2.0, with Home and Play, Health, Mods, Saves, a Gallery and What's new; Released in 4.1.1: Apex Launcher 2.3, with Game settings, adding files, profiles, merges edited in one go, save cleaning and backups; Released in 4.1.2: Apex Launcher 2.3.1, a Load order page, a health card on Home and scrapbook frames drawn anew |
 
 ### Removed
 

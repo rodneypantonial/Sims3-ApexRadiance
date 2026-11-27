@@ -1,7 +1,7 @@
 # Workflow: build, test, install, diagnose, release
 
-This page is the operating manual for working on Apex Radiance: where things are, how to build and test the ASI, how
-to install it on the test machine, how to read a problem report and how a version is released. The project rules in
+This page is the operating manual for working on Apex Radiance: where things are, how to build and test the ASI and
+Apex Launcher, how to install it on the test machine, how to read a problem report and how a version is released. The project rules in
 [section 3](#3-project-rules) apply to every change. Framework internals are in [architecture.md](architecture.md).
 The earlier combined-build process (Apex inside a fork of Sims3SettingsSetter) is kept in
 [history/workflow.md](history/workflow.md).
@@ -17,6 +17,8 @@ The earlier combined-build process (Apex inside a fork of Sims3SettingsSetter) i
 | Official S3SS config and log | `...\The Sims 3\S3SS\` |
 | Previous standalone (`S3SSApex.asi`), read once for migration | `...\The Sims 3\S3SS\Apex\` |
 | MSBuild | `C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\MSBuild\Current\Bin\MSBuild.exe` |
+| Apex Launcher source, tests, UI smoke harness | `installer/ApexSetup/`, `installer/ApexSetup.Core/`, `installer/ApexSetup.Tests/`, `installer/ui-smoke/` |
+| Apex Launcher data and log (`ApexLauncher.log`) | `%LOCALAPPDATA%\Apex Launcher\` ([data folders and files](features/launcher/data-and-files.md)) |
 
 **Reference setup:** The Sims 3 Steam 1.67.2 with Ultimate ASI Loader as `wininet.dll`, tested both on native
 Direct3D 9 and on DXVK.
@@ -116,6 +118,29 @@ follows the setting named on its page.
 | `sun_lamp_level` | Shipped | Outdoor lamp light fades with the sun's height at dawn and dusk; off, it follows the sky's level, which snaps in half a second at dawn | [rt-outdoor-lamps.md](features/night-lighting/rt-outdoor-lamps.md) |
 
 
+### Apex Launcher
+
+Apex Launcher ([features/launcher/](features/launcher/README.md)) is a separate C# solution under `installer/`: the
+WinUI 3 window (`ApexSetup`, assembly `ApexLauncher`), its logic (`ApexSetup.Core`) and the tests (`ApexSetup.Tests`).
+It needs the .NET 8 SDK on Windows (x64); the Windows App SDK comes from NuGet on the first build. Run from the
+repository root:
+
+```
+dotnet build installer/ApexSetup -c Release                              # build the window
+dotnet run --project installer/ApexSetup.Tests -c Release                 # offline tests, no game, no network
+dotnet publish installer/ApexSetup -c Release -o installer/publish        # one self-contained exe: installer/publish/ApexLauncher.exe
+```
+
+- Every change to the launcher raises `<Version>` in `installer/ApexSetup/ApexSetup.csproj` (patch for fixes and
+  texts, minor for features): installed launchers update only to a higher version ([self-update](features/launcher/self-update.md)).
+- Start a test copy with its own data and Documents folders so it never touches the player's launcher, mods or saves:
+  `APEX_LAUNCHER_LOCALAPPDATA`, `APEX_SETUP_DOCUMENTS`, `APEX_LAUNCHER_PORTABLE=1`, and `APEX_SETUP_DRY_RUN=1` to write
+  nothing to the game or the drivers ([test variables](features/launcher/data-and-files.md#technical-reference)).
+- The UI smoke harness and the Mods harness drive the published exe through UI Automation; how to run them and their
+  latest results are on the [validation page](validation/installer.md#automated-tests).
+- New launcher texts go into every `installer/ApexSetup/Strings.<code>.cs` table ([languages](features/launcher/languages.md)).
+- Look and layout follow the [design system](launcher-design.md); `DesignTests` checks its rules.
+
 ---
 
 ## 2. Install
@@ -165,6 +190,7 @@ Most Apex Radiance code patches a game that cannot run under a test framework. O
 can be checked without the game: shader patchers over the real shader package, production policies extracted from
 the source, GPU readback of Apex's own HLSL, and codec equivalence against translations of the game's functions. Each
 feature's validation page (`docs/validation/<feature>.md`) lists its harnesses, how to run them and the latest results.
+Apex Launcher has its own C# tests and UI harnesses ([Apex Launcher](#apex-launcher), [validation](validation/installer.md)).
 
 ### Conventions
 
@@ -214,11 +240,14 @@ failure; CI runs `Smoke` and `Lighting`.
 | `tools/game_alloc_categories_test/` | The development flavour's game allocation category tables under concurrency (`run.ps1`) |
 | `tools/crt_math_test/` | CRT math replaced in hot code: `Pow2` against `std::ldexp` over every half value, `ApexMath::Hypot` against `std::hypot` over random pairs (`run.ps1`) |
 | `tools/delegate_sig_fix_test/` | Delegate signature fix: the stub inside the game's check sequence (crash memory, `Object[]`, other parameter), the pattern and call target in TS3W.exe (`run.ps1 [-Exe <TS3W.exe>]`) |
+| `tools/save_name_fix_test/` | Save name fix: the patch's offsets and branches, both patterns in the game's script assembly (`run.ps1 [-Dll <Sims3GameplaySystems.dll>]`) |
 | `tools/bone_index_guard_test/` | Bone index guard: Apex's getter called as the game calls it (valid index, past the list, empty list, stack balance), the pattern in TS3W.exe (`run.ps1 [-Exe <TS3W.exe>]`) |
 | `tools/dxt_test/` | Fast DXT1 / DXT5 encoder against the translation of `0x006152F0` / `0x006154B0` |
+| `tools/second_device_probe/` | In game, never shipped: an ASI that makes and releases a throwaway Direct3D 9 device the way Turbo Simulation Engine does, before or after the game's first frame (Display, the RTX Remix bridge's second-device answer) |
 | `tools/i18n_check/` | Translation tables: conflicts, missing languages, placeholder and `##id` mismatches; coverage and stale keys of the other languages; `i18n/keys.tsv` up to date (`tools/i18n_keys.pl` writes it) |
 | `tools/liveness_prune_test/` | Pruning of per-story caches by live story managers (`features/liveness_prune.h`, `run.ps1`) |
 | `tools/loading_gate_test/` | Loaded-world reader and the extracted start-notice and Depth Blur loading guards (`run.ps1`) |
+| `tools/looks_rest_test/` | Looks: ReShade Effect Shader Toggler configurations (`features/looks_rest.cpp`): the .ini parser as REST reads it, CRC32, which techniques a group takes, render-target size matching; optionally lists a given .ini |
 | `tools/looks_test/` | Looks: the preset loader (values, definitions, old `apex:` references) and the in-game licence texts against `LICENSES.md` |
 | `tools/lot_streaming_test/` | Lot Streaming: the shared lot build time decision and a replay of recorded lot loads, the detailed-lot hysteresis model, the Steam bytes (`run.ps1 [-CsvDir <folder>] [-Exe <TS3W.exe>]`) |
 | `tools/settings_migration_test/` | The one-time move to the new lighting defaults: old defaults move, choices stay, new values are the registered ones (`run.ps1`) |
