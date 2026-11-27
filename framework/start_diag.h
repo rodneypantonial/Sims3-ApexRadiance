@@ -5,9 +5,10 @@
 // On by default in this build; a file diag_off.txt in the Apex folder turns it off.
 #include <windows.h>
 #include "edit_in_game_arg.h"
+#include <string>
 
 namespace StartDiag {
-void Start(const EditInGameArg::Scan& scan); // init thread, once the log is open: start lines, then a background thread
+void Start(const EditInGameArg::Scan& scan, const std::string& parent, const std::string& grandparent); // init thread, once the log is open: start lines, then a background thread
 void Pump();                                 // start-up pump thread (10 ms)
 void NoteWindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp); // game window thread, every message, no IO
 } // namespace StartDiag

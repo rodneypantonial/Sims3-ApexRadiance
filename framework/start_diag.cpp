@@ -118,10 +118,6 @@ std::vector<Proc> Processes() {
     CloseHandle(snap);
     return out;
 }
-const Proc* Find(const std::vector<Proc>& all, DWORD pid) {
-    for (const auto& p : all) if (pid && p.pid == pid) return &p;
-    return nullptr;
-}
 std::wstring ImagePath(DWORD pid) {
     std::wstring path;
     if (HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid)) {
@@ -133,17 +129,13 @@ std::wstring ImagePath(DWORD pid) {
     return path;
 }
 
-void LogStart(const EditInGameArg::Scan& scan) {
+void LogStart(const EditInGameArg::Scan& scan, const std::string& parent, const std::string& grandparent) {
     std::wstring line = GetCommandLineW();
     if (line.size() > 1500) line = line.substr(0, 1500) + L"...";
     LOG_INFO("[Diag] Command line (after the edit-in-game rename): " + M(line));
     const auto all = Processes();
-    const Proc* self = Find(all, GetCurrentProcessId());
-    const Proc* parent = self ? Find(all, self->parent) : nullptr;
-    const Proc* grand = parent ? Find(all, parent->parent) : nullptr;
-    // (a parent that already exited shows as gone; its pid may also have been reused by an unrelated process)
-    LOG_INFO(std::format("[Diag] Parent {} (pid {}), grandparent {} (pid {})", parent ? M(parent->name) : "gone", self ? self->parent : 0,
-                         grand ? M(grand->name) : "gone", parent ? parent->parent : 0));
+    // (names from the handles DllMain kept: a launcher that exited since still shows, marked "exited")
+    LOG_INFO("[Diag] Parent " + M(ApexUtil::ToWide(parent)) + ", grandparent " + M(ApexUtil::ToWide(grandparent)));
     LOG_INFO(std::format("[Diag] EditInGameArg: -apexDirect {}, editInGameMode found {}, value \"{}\", renamed {}, renamed for \"true0\" {}",
                          scan.marked ? "yes" : "no", scan.found, scan.value, scan.renamed, scan.legacy));
     std::string launchers, related;
@@ -609,7 +601,7 @@ void PumpWatch(ULONGLONG now) {
 
 } // namespace
 
-void Start(const EditInGameArg::Scan& scan) {
+void Start(const EditInGameArg::Scan& scan, const std::string& parent, const std::string& grandparent) {
     g_on = GetFileAttributesW((ApexPaths::ApexDirectory() + L"diag_off.txt").c_str()) == INVALID_FILE_ATTRIBUTES;
     if (!g_on) { LOG_INFO("[Diag] build diag-1127: off (diag_off.txt)"); return; }
     LOG_INFO("[Diag] build diag-1127: start diagnostics on (read-only; a file diag_off.txt in the Apex folder turns them off)");
@@ -619,7 +611,7 @@ void Start(const EditInGameArg::Scan& scan) {
     GetProcessTimes(GetCurrentProcess(), &g_processStart, &a, &b, &c);
     g_cmdSave = CommandLineSave();
     RegisterDllNotification();
-    HookGuard::Try("Diag: start", [&] { LogStart(scan); });
+    HookGuard::Try("Diag: start", [&] { LogStart(scan, parent, grandparent); });
     if (HANDLE t = CreateThread(nullptr, 0, BackgroundThread, nullptr, 0, nullptr)) CloseHandle(t);
 }
 

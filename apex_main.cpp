@@ -72,21 +72,48 @@ bool Stopping(DWORD waitMs = 0) { return g_stop && WaitForSingleObject(g_stop, w
 
 EditInGameArg::Scan g_editArgW, g_editArgA; // DllMain's command-line scan, logged once the log is open
 
-std::string ParentProcessName() {
-    const DWORD self = GetCurrentProcessId();
-    DWORD parent = 0;
-    std::wstring name = L"?";
-    HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-    if (snap == INVALID_HANDLE_VALUE) return "?";
-    PROCESSENTRY32W e{sizeof e};
-    for (BOOL ok = Process32FirstW(snap, &e); ok; ok = Process32NextW(snap, &e))
-        if (e.th32ProcessID == self) { parent = e.th32ParentProcessID; break; }
-    e.dwSize = sizeof e;
-    for (BOOL ok = parent && Process32FirstW(snap, &e); ok; ok = Process32NextW(snap, &e))
-        if (e.th32ProcessID == parent) { name = e.szExeFile; break; }
-    CloseHandle(snap);
-    return ApexUtil::ToUtf8(name);
+// The launcher that started the game often exits before the init thread runs (Sims3Launcher.exe on the EA app copy), and a
+// process snapshot then no longer lists it. DllMain keeps a handle to the parent (and its parent): the name stays
+// readable from the handle after the process exited, and the pid cannot be reused while the handle is open.
+HANDLE g_parentProcess = nullptr, g_grandparentProcess = nullptr;
+
+DWORD ParentPid(HANDLE process) {
+    struct Basic { LONG exitStatus; PVOID peb; ULONG_PTR affinity; LONG priority; ULONG_PTR pid, parent; } info{};
+    using Query = LONG(NTAPI*)(HANDLE, int, PVOID, ULONG, PULONG);
+    const auto query = reinterpret_cast<Query>(GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "NtQueryInformationProcess"));
+    return query && query(process, 0, &info, sizeof info, nullptr) == 0 ? static_cast<DWORD>(info.parent) : 0; // 0 = ProcessBasicInformation
 }
+
+// A handle to the parent of `child`, only when it started before the child (else the pid was reused by another process)
+HANDLE OpenParent(HANDLE child) {
+    const DWORD pid = ParentPid(child);
+    HANDLE parent = pid ? OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid) : nullptr;
+    FILETIME pc{}, cc{}, x, y, z;
+    if (parent && (!GetProcessTimes(parent, &pc, &x, &y, &z) || !GetProcessTimes(child, &cc, &x, &y, &z) || CompareFileTime(&pc, &cc) > 0)) {
+        CloseHandle(parent);
+        parent = nullptr;
+    }
+    return parent;
+}
+
+void CaptureParents() { // DllMain: no snapshot, no loader work
+    g_parentProcess = OpenParent(GetCurrentProcess());
+    if (g_parentProcess) g_grandparentProcess = OpenParent(g_parentProcess);
+}
+
+std::string ProcessName(HANDLE process) {
+    wchar_t path[MAX_PATH * 2] = {};
+    DWORD n = MAX_PATH * 2;
+    if (!process || !QueryFullProcessImageNameW(process, 0, path, &n)) return "?";
+    const wchar_t* base = path;
+    for (const wchar_t* p = path; *p; ++p)
+        if (*p == L'\\' || *p == L'/') base = p + 1;
+    DWORD code = 0;
+    return ApexUtil::ToUtf8(base) + (GetExitCodeProcess(process, &code) && code != STILL_ACTIVE ? " (exited)" : "");
+}
+
+std::string ParentProcessName() { return ProcessName(g_parentProcess); }
+std::string GrandparentProcessName() { return ProcessName(g_grandparentProcess); }
 
 // One line on how the game was started (a save opened directly or the main menu, Apex Launcher's marker, the game's
 // -editInGameMode and what was renamed) and, when the switch was renamed, the pack selection the game reads instead
@@ -248,7 +275,7 @@ DWORD InitBody() {
     LOG_INFO("[Main] Platform: " + Platform::Summary());
     LogEnvironment();
     LogLaunch();
-    StartDiag::Start(g_editArgW); // diagnostics build: [Diag] lines (start_diag.h)
+    StartDiag::Start(g_editArgW, ParentProcessName(), GrandparentProcessName()); // diagnostics build: [Diag] lines (start_diag.h)
     // Apex's HLSL shaders (every quality and mode) compile now on a background thread, so the render thread never runs
     // D3DCompile: the features only create the shader objects from the bytecode (shader_cache.h).
     ShaderCache::Start();
@@ -364,6 +391,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID reserved) {
         // (first: before the game reads its arguments; only for Apex Launcher's start, edit_in_game_arg.h)
         g_editArgW = EditInGameArg::Rename(GetCommandLineW());
         g_editArgA = EditInGameArg::Rename(GetCommandLineA());
+        CaptureParents(); // before a launcher that exits at once is gone ([LaunchDiag] parent)
         if (!ModuleLifetime::Pin(module)) {
             OutputDebugStringA("[" APEX_PRODUCT_NAME "] Could not retain the module for process lifetime; no hooks or workers started\n");
             return FALSE;
