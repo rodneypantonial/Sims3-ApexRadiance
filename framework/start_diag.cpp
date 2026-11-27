@@ -129,13 +129,18 @@ std::wstring ImagePath(DWORD pid) {
     return path;
 }
 
-void LogStart(const EditInGameArg::Scan& scan, const std::string& parent, const std::string& grandparent) {
+void LogStart(const EditInGameArg::Scan& scan, const std::string& parent, const std::string& grandparent, DWORD grandparentPid) {
     std::wstring line = GetCommandLineW();
     if (line.size() > 1500) line = line.substr(0, 1500) + L"...";
     LOG_INFO("[Diag] Command line (after the edit-in-game rename): " + M(line));
     const auto all = Processes();
     // (names from the handles DllMain kept: a launcher that exited since still shows, marked "exited")
     LOG_INFO("[Diag] Parent " + M(ApexUtil::ToWide(parent)) + ", grandparent " + M(ApexUtil::ToWide(grandparent)));
+    std::string siblings; // the grandparent's other children (a launcher that started the game through a helper)
+    int nSiblings = 0;
+    for (const auto& p : all)
+        if (grandparentPid && p.parent == grandparentPid && p.pid != GetCurrentProcessId() && ++nSiblings <= 20) siblings += std::format(" {} ({})", M(p.name), p.pid);
+    if (grandparentPid) LOG_INFO("[Diag] Other running children of the grandparent:" + (siblings.empty() ? std::string(" none") : siblings));
     LOG_INFO(std::format("[Diag] EditInGameArg: -apexDirect {}, editInGameMode found {}, value \"{}\", renamed {}, renamed for \"true0\" {}",
                          scan.marked ? "yes" : "no", scan.found, scan.value, scan.renamed, scan.legacy));
     std::string launchers, related;
@@ -339,7 +344,7 @@ void LogMods() {
         if (r == StartDiagLogic::Has::Bad) ++bad;
         else if (r == StartDiagLogic::Has::Yes && ++scriptCount <= 200) scripts += "\n    " + M(packages[i]);
     }
-    LOG_INFO(std::format("[Diag] Script mods (S3SA in the package index): {} of {} packages scanned{}{}, {} unreadable or not DBPF 2:{}", scriptCount, scan,
+    LOG_INFO(std::format("[Diag] Script mods (S3SA in the package index): {} script mods of {} packages scanned{}{}, {} unreadable or not DBPF 2:{}", scriptCount, scan,
                          packages.size() > scan ? std::format(" ({} not scanned)", packages.size() - scan) : std::string(),
                          scriptCount > 200 ? std::format(", {} not listed", scriptCount - 200) : std::string(), bad, scripts.empty() ? std::string(" none") : scripts));
 
@@ -554,11 +559,12 @@ void PumpWatch(ULONGLONG now) {
     g_mode = mode;
     g_active = active;
     if (!g_watchStart) {
-        // the mode alone: a save stuck in edit-in-game mode may never set the active byte
-        g_settled.Update(known && mode >= 1 && mode <= 3, now);
+        // live (active) for 3 s, or edit-in-game mode 2, where time is stopped and the active byte may stay 0; mode 1 with
+        // active 0 is still the load
+        g_settled.Update(known && (WorldSession::Active(static_cast<unsigned char>(active), mode) || mode == 2), now);
         if (!g_settled.ready) return;
         g_watchStart = now;
-        LOG_INFO(std::format("[Diag] Pause watch: world settled (mode {}, active {}), watching 10 min; game speed, pause state and sim clock: "
+        LOG_INFO(std::format("[Diag] Pause watch: world live for 3 s (mode {}, active {}), watching 10 min; game speed, pause state and sim clock: "
                              "unavailable (no address verified for this game build)", mode, active));
         if (HANDLE t = CreateThread(nullptr, 0, SaveCheckThread, nullptr, 0, nullptr)) CloseHandle(t);
     }
@@ -588,7 +594,7 @@ void PumpWatch(ULONGLONG now) {
     const HWND fg = GetForegroundWindow();
     DWORD fgPid = 0;
     if (fg) GetWindowThreadProcessId(fg, &fgPid);
-    const std::string state = std::format("mode {} active {}, game window {}{}, other windows of the game {} (dialogs {})", known ? mode : -9, active,
+    const std::string state = std::format("mode {} active {}, game window {}{}, OS windows of the game process {} (OS dialogs {}; in-game dialogs not counted)", known ? mode : -9, active,
                                           !window ? "not seen yet" : fg == window ? "in front" : fgPid == GetCurrentProcessId() ? "behind its own window" : "not in front",
                                           window && IsIconic(window) ? ", minimized" : "", c.others, c.dialogs);
     switch (g_state.Next(state, now, kHeartbeatMs)) {
@@ -601,7 +607,7 @@ void PumpWatch(ULONGLONG now) {
 
 } // namespace
 
-void Start(const EditInGameArg::Scan& scan, const std::string& parent, const std::string& grandparent) {
+void Start(const EditInGameArg::Scan& scan, const std::string& parent, const std::string& grandparent, DWORD grandparentPid) {
     g_on = GetFileAttributesW((ApexPaths::ApexDirectory() + L"diag_off.txt").c_str()) == INVALID_FILE_ATTRIBUTES;
     if (!g_on) { LOG_INFO("[Diag] build diag-1127: off (diag_off.txt)"); return; }
     LOG_INFO("[Diag] build diag-1127: start diagnostics on (read-only; a file diag_off.txt in the Apex folder turns them off)");
@@ -611,7 +617,7 @@ void Start(const EditInGameArg::Scan& scan, const std::string& parent, const std
     GetProcessTimes(GetCurrentProcess(), &g_processStart, &a, &b, &c);
     g_cmdSave = CommandLineSave();
     RegisterDllNotification();
-    HookGuard::Try("Diag: start", [&] { LogStart(scan, parent, grandparent); });
+    HookGuard::Try("Diag: start", [&] { LogStart(scan, parent, grandparent, grandparentPid); });
     if (HANDLE t = CreateThread(nullptr, 0, BackgroundThread, nullptr, 0, nullptr)) CloseHandle(t);
 }
 

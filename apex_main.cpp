@@ -53,6 +53,7 @@
 #include "edit_in_game_arg.h"
 #include "start_diag.h"
 #include <tlhelp32.h>
+#include <psapi.h>
 #include <format>
 #include <string>
 
@@ -72,10 +73,9 @@ bool Stopping(DWORD waitMs = 0) { return g_stop && WaitForSingleObject(g_stop, w
 
 EditInGameArg::Scan g_editArgW, g_editArgA; // DllMain's command-line scan, logged once the log is open
 
-// The launcher that started the game often exits before the init thread runs (Sims3Launcher.exe on the EA app copy), and a
-// process snapshot then no longer lists it. DllMain keeps a handle to the parent (and its parent): the name stays
-// readable from the handle after the process exited, and the pid cannot be reused while the handle is open.
-HANDLE g_parentProcess = nullptr, g_grandparentProcess = nullptr;
+// The process that started the game can exit before the init thread runs (on the EA app copy the game's parent is gone
+// by then while its parent, the EA app, runs), and a process snapshot then no longer lists it. DllMain keeps a handle to
+// the parent and its parent and reads their names at once; the pid cannot be reused while the handle is open.
 
 DWORD ParentPid(HANDLE process) {
     struct Basic { LONG exitStatus; PVOID peb; ULONG_PTR affinity; LONG priority; ULONG_PTR pid, parent; } info{};
@@ -96,24 +96,47 @@ HANDLE OpenParent(HANDLE child) {
     return parent;
 }
 
-void CaptureParents() { // DllMain: no snapshot, no loader work
-    g_parentProcess = OpenParent(GetCurrentProcess());
-    if (g_parentProcess) g_grandparentProcess = OpenParent(g_parentProcess);
-}
+// The image name, read while the process still runs: Windows no longer gives it once the process exited (the handle
+// then only answers the pid, times and exit code). Fixed buffers: DllMain allocates nothing.
+struct Kin { HANDLE handle = nullptr; DWORD pid = 0, error = 0; wchar_t name[MAX_PATH] = {}; };
+Kin g_parent, g_grandparent;
 
-std::string ProcessName(HANDLE process) {
+void ReadImageName(Kin& k) {
     wchar_t path[MAX_PATH * 2] = {};
     DWORD n = MAX_PATH * 2;
-    if (!process || !QueryFullProcessImageNameW(process, 0, path, &n)) return "?";
+    if (!QueryFullProcessImageNameW(k.handle, 0, path, &n) && !K32GetProcessImageFileNameW(k.handle, path, MAX_PATH * 2)) {
+        k.error = GetLastError();
+        return;
+    }
     const wchar_t* base = path;
     for (const wchar_t* p = path; *p; ++p)
         if (*p == L'\\' || *p == L'/') base = p + 1;
-    DWORD code = 0;
-    return ApexUtil::ToUtf8(base) + (GetExitCodeProcess(process, &code) && code != STILL_ACTIVE ? " (exited)" : "");
+    wcsncpy_s(k.name, base, _TRUNCATE);
 }
 
-std::string ParentProcessName() { return ProcessName(g_parentProcess); }
-std::string GrandparentProcessName() { return ProcessName(g_grandparentProcess); }
+void CaptureParents() { // DllMain: no snapshot, no loader work
+    g_parent.handle = OpenParent(GetCurrentProcess());
+    if (!g_parent.handle) return;
+    g_parent.pid = GetProcessId(g_parent.handle);
+    ReadImageName(g_parent);
+    g_grandparent.handle = OpenParent(g_parent.handle);
+    if (!g_grandparent.handle) return;
+    g_grandparent.pid = GetProcessId(g_grandparent.handle);
+    ReadImageName(g_grandparent);
+}
+
+// "name (pid N)", "?" without a parent; a process that exited by now is marked, one whose name could not be read
+// (it had exited before this DLL loaded) gives the error instead
+std::string ProcessName(const Kin& k) {
+    if (!k.handle) return "?";
+    DWORD code = 0;
+    const bool exited = GetExitCodeProcess(k.handle, &code) && code != STILL_ACTIVE;
+    const std::string name = k.name[0] ? ApexUtil::ToUtf8(k.name) : std::format("name not readable (error {})", k.error);
+    return std::format("{} (pid {}{})", name, k.pid, exited ? std::format(", exited, code 0x{:X}", code) : "");
+}
+
+std::string ParentProcessName() { return ProcessName(g_parent); }
+std::string GrandparentProcessName() { return ProcessName(g_grandparent); }
 
 // One line on how the game was started (a save opened directly or the main menu, Apex Launcher's marker, the game's
 // -editInGameMode and what was renamed) and, when the switch was renamed, the pack selection the game reads instead
@@ -275,7 +298,7 @@ DWORD InitBody() {
     LOG_INFO("[Main] Platform: " + Platform::Summary());
     LogEnvironment();
     LogLaunch();
-    StartDiag::Start(g_editArgW, ParentProcessName(), GrandparentProcessName()); // diagnostics build: [Diag] lines (start_diag.h)
+    StartDiag::Start(g_editArgW, ParentProcessName(), GrandparentProcessName(), g_grandparent.pid); // diagnostics build: [Diag] lines (start_diag.h)
     // Apex's HLSL shaders (every quality and mode) compile now on a background thread, so the render thread never runs
     // D3DCompile: the features only create the shader objects from the bytecode (shader_cache.h).
     ShaderCache::Start();
