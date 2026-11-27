@@ -197,12 +197,15 @@ public sealed partial class MainWindow
     // Home's update button: the ready updates in the install card, then the done screen; the game is not started
     async Task UpdateOnlyAsync()
     {
-        if (_game is null || _busy || _starting || WelcomeUpdates() is not { Count: > 0 } ups) return;
+        if (_game is null || _busy || _starting) return;
+        var ups = WelcomeUpdates();
+        if (ups.Count == 0) { _launcherUpdate?.Install(); return; } // (the launcher's own alone: it restarts at once)
         if (_running || _session is not null || Games.IsRunning()) { await Message(T("The Sims 3 is already running"), T("Close the game, then install the updates.")); return; }
         _wizardFlow = _updatingOnly = true;
         try { await InstallAsync(ups); }
         // (the done screen keeps the install card's layout: leaving it ends the flow, WizardChrome)
         finally { _updatingOnly = false; if (_step != DoneStep) _wizardFlow = false; }
+        if (WelcomeUpdates().Count == 0) _launcherUpdate?.Install(); // (last, once the others went in: it restarts the launcher)
     }
 
     async Task StartChecked(Game g, string? save, bool update)
@@ -273,7 +276,8 @@ public sealed partial class MainWindow
         MenuTheme(g);
         // (the EA app copy waits for the EA app to start it: busy meanwhile, so no install starts under it)
         _busy = true;
-        try { p = await Task.Run(() => Launch.Start(g, save)); }
+        var apexVersion = _state?.ApexVersion;
+        try { p = await Task.Run(() => Launch.Start(g, save, apexVersion)); }
         catch (Exception e) { _busy = false; App.Log(e); await Message(T("The game did not start"), ErrorText(e)); return; }
         _busy = false;
         var session = _session = new Session(p, Docs);
