@@ -33,10 +33,20 @@ constexpr size_t kScanPackages = 5000, kListNames = 100, kWalkEntries = 200000;
 
 bool g_on = false;
 std::wstring g_profile, g_user;
+std::vector<std::wstring> g_oneDrive; // OneDrive folders, masked as %OneDrive%
 FILETIME g_processStart{};
+ULONGLONG g_tick0 = 0; // GetTickCount64 at the process start: SinceStart
+std::atomic<uint32_t> g_bitsNow{0};
+std::atomic<int> g_errorCount{0};
+std::atomic<long long> g_lastErrorAt{-1}; // seconds from the start of the newest error file
+std::mutex g_recentLock;
+std::vector<std::string> g_recent; // files written in the 10 min before the start (verdict)
+std::atomic<bool> g_footprintDone{false};
 std::wstring g_cmdSave; // the save named by -worldFile (file name only), empty without one
 
-std::string M(const std::wstring& s) { return ApexUtil::ToUtf8(StartDiagLogic::Mask(s, g_profile, g_user)); }
+std::string M(const std::wstring& s) { return ApexUtil::ToUtf8(StartDiagLogic::Mask(s, g_oneDrive, g_profile, g_user)); }
+long long Ticks(const FILETIME& f) { return static_cast<long long>((static_cast<ULONGLONG>(f.dwHighDateTime) << 32) | f.dwLowDateTime); }
+long long SinceStart(ULONGLONG now) { return static_cast<long long>(now - g_tick0) / 1000; }
 
 std::wstring Env(const wchar_t* name) {
     wchar_t buf[MAX_PATH] = {};
@@ -299,7 +309,7 @@ void LogMods() {
     size_t entries = 0, other = 0;
     int maxDepth = 0;
     std::string overrides, flagged;
-    size_t overrideCount = 0, flaggedCount = 0;
+    size_t overrideCount = 0, flaggedCount = 0, recentPackages = 0, laterPackages = 0;
     while (!stack.empty() && entries < kWalkEntries) {
         const Dir d = stack.back();
         stack.pop_back();
@@ -319,6 +329,12 @@ void LogMods() {
             if (!EndsWithI(name, L".package")) { ++other; continue; }
             packages.push_back(rel);
             bytes += Bytes(fd);
+            {
+                bool recent = false;
+                StartDiagLogic::Footprint(Ticks(fd.ftLastWriteTime), Ticks(g_processStart), recent);
+                if (recent) ++recentPackages;
+                if (Ticks(fd.ftLastWriteTime) > Ticks(g_processStart)) ++laterPackages;
+            }
             const std::wstring lower = Lower(rel);
             if (lower.rfind(L"overrides\\", 0) == 0 && ++overrideCount <= kListNames) overrides += " " + M(rel);
             for (const wchar_t* f : kFlags)
@@ -331,6 +347,11 @@ void LogMods() {
     }
     LOG_INFO(std::format("[Diag] Mods: {} packages, {}, folder depth {}, {} other files{}", packages.size(), Mb(bytes), maxDepth, other,
                          entries >= kWalkEntries ? std::format(" (walk stopped at {} entries)", kWalkEntries) : std::string()));
+    LOG_INFO(std::format("[Diag] Footprint: Mods packages written in the 10 min before the start {}, after the start {}", recentPackages, laterPackages));
+    if (recentPackages) {
+        std::lock_guard<std::mutex> l(g_recentLock);
+        g_recent.push_back(std::format("{} Mods packages", recentPackages));
+    }
     LOG_INFO(std::format("[Diag] Mods\\Overrides packages ({}):{}{}", overrideCount, overrides.empty() ? std::string(" none") : overrides,
                          overrideCount > kListNames ? std::format(" ... {} more not listed", overrideCount - kListNames) : std::string()));
     LOG_INFO(std::format("[Diag] Mods with flagged names ({}):{}{}", flaggedCount, flagged.empty() ? std::string(" none") : flagged,
@@ -394,6 +415,37 @@ std::wstring CommandLineSave() {
     return slash == std::wstring::npos ? v : v.substr(slash + 1);
 }
 
+// Copies of the switch in the process's private memory, read once (committed, readable, no guard pages; every read
+// guarded): a copy the game or a mod took before DllMain renamed the switch would still say -editInGameMode
+bool ScanRegion(const uint8_t* p, size_t n, StartDiagLogic::ArgCopies& from, StartDiagLogic::ArgCopies& to) {
+    __try {
+        StartDiagLogic::CountArg(p, n, "editInGameMode", from);
+        StartDiagLogic::CountArg(p, n, "apexNoEditMode", to);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+void LogArgCopies() {
+    StartDiagLogic::ArgCopies from, to;
+    unsigned long long scanned = 0;
+    int faults = 0;
+    MEMORY_BASIC_INFORMATION mbi{};
+    for (uintptr_t at = 0x10000; at < 0xFFFF0000u && scanned < (3ull << 30) && VirtualQuery(reinterpret_cast<LPCVOID>(at), &mbi, sizeof mbi); ) {
+        const uintptr_t next = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
+        const DWORD prot = mbi.Protect & 0xFF;
+        const bool readable = prot == PAGE_READONLY || prot == PAGE_READWRITE || prot == PAGE_EXECUTE_READ || prot == PAGE_EXECUTE_READWRITE;
+        if (mbi.State == MEM_COMMIT && mbi.Type == MEM_PRIVATE && readable && !(mbi.Protect & PAGE_GUARD)) {
+            if (!ScanRegion(static_cast<const uint8_t*>(mbi.BaseAddress), mbi.RegionSize, from, to)) ++faults;
+            scanned += mbi.RegionSize;
+        }
+        if (next <= at) break;
+        at = next;
+    }
+    LOG_INFO(std::format("[Diag] Command-line switch copies in private memory ({} scanned, {} regions faulted): -editInGameMode: ASCII {} (on {}), UTF-16 {} (on {}); "
+                         "-apexNoEditMode: ASCII {}, UTF-16 {}",
+                         Mb(scanned), faults, from.ascii, from.asciiOn, from.wide, from.wideOn, to.ascii, to.wide));
+}
+
 // After the world settled: the save folder read most recently (last-access times; Windows may not update them)
 DWORD WINAPI SaveCheckThread(LPVOID) {
     HookGuard::Try("Diag: save check", [] {
@@ -420,6 +472,8 @@ DWORD WINAPI SaveCheckThread(LPVOID) {
             LOG_INFO(std::format("[Diag] Save read most recently: {}{}", describe(*recent),
                                  g_cmdSave.empty() ? "" : (named == recent ? " (the command line's)" : " (NOT the command line's)")));
     });
+    SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
+    HookGuard::Try("Diag: switch copies", [] { LogArgCopies(); });
     return 0;
 }
 
@@ -438,7 +492,8 @@ void LogPacksAndOptions() {
         while (!l.empty() && (l.back() == '\r' || l.back() == ' ')) l.pop_back();
         std::string lower = l;
         for (auto& c : lower) c = static_cast<char>(tolower(static_cast<unsigned char>(c)));
-        for (const char* k : {"pause", "focus", "mute", "autosave", "speed", "time", "background", "edgescroll", "story"})
+        for (const char* k : {"pause", "focus", "mute", "autosave", "speed", "time", "background", "edgescroll", "story", "interactiveloading", "memories", "ingamestore",
+                              "connecttns", "requirelogin"})
             if (lower.find(k) != std::string::npos && lower.find('=') != std::string::npos) { keys += " " + l; break; }
         if (e == std::string::npos) break;
         s = e + 1;
@@ -458,6 +513,169 @@ void LogPacksAndOptions() {
     LOG_INFO("[Diag] Installed packs (registry SOFTWARE\\Sims):" + (packs.empty() ? std::string(" none found") : packs));
 }
 
+// ---- 8. Launcher footprint, process, the other mods' time settings ----
+std::string ReadTail(const std::wstring& path, size_t cap) {
+    std::string out;
+    HANDLE f = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (f == INVALID_HANDLE_VALUE) return out;
+    LARGE_INTEGER size{}, at{};
+    if (GetFileSizeEx(f, &size)) {
+        at.QuadPart = size.QuadPart > static_cast<LONGLONG>(cap) ? size.QuadPart - static_cast<LONGLONG>(cap) : 0;
+        out.resize(static_cast<size_t>(size.QuadPart - at.QuadPart));
+        DWORD got = 0;
+        if (!SetFilePointerEx(f, at, nullptr, FILE_BEGIN) || !ReadFile(f, out.data(), static_cast<DWORD>(out.size()), &got, nullptr)) got = 0;
+        out.resize(got);
+    }
+    CloseHandle(f);
+    return out;
+}
+
+std::wstring LauncherDir() { return Env(L"LOCALAPPDATA") + L"\\Apex Launcher\\"; }
+
+// "<label> N bytes, written ..." for one file; a write in the 10 min before the start also goes to the verdict
+std::string FootLine(const std::wstring& label, const std::wstring& path) {
+    WIN32_FILE_ATTRIBUTE_DATA a{};
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &a)) return M(label) + " not found";
+    bool recent = false;
+    const long long write = Ticks(a.ftLastWriteTime), start = Ticks(g_processStart);
+    const std::string note = StartDiagLogic::Footprint(write, start, recent);
+    if (recent) {
+        std::lock_guard<std::mutex> l(g_recentLock);
+        g_recent.push_back(std::format("{} ({} s before)", M(label), (start - write) / 10000000));
+    }
+    return std::format("{} {} bytes, {}{}", M(label), (static_cast<unsigned long long>(a.nFileSizeHigh) << 32) | a.nFileSizeLow, note, recent ? " [RECENT]" : "");
+}
+
+void LogFootprint() {
+    const std::wstring docs = ApexPaths::GameDocumentsDirectory(), bin = BinDir(), launcher = LauncherDir();
+    std::string text;
+    int n = 0;
+    const auto add = [&](const std::wstring& label, const std::wstring& path) { if (++n <= 120) text += "\n    " + FootLine(label, path); };
+    add(L"Options.ini", docs + L"Options.ini");
+    add(L"LoadOption.ini", docs + L"LoadOption.ini");
+    add(L"Mods\\Resource.cfg", docs + L"Mods\\Resource.cfg");
+    add(L"ApexRadiance.toml", ApexPaths::ConfigFile());
+    add(L"S3SS.toml", ApexPaths::S3SSConfigFile());
+    for (const wchar_t* f : {L"dxvk.conf", L"bridge.conf", L".trex\\bridge.conf", L"d3d9.dll"}) add(std::wstring(L"Game\\Bin\\") + f, bin + f);
+    for (const wchar_t* sub : {L"", L"scripts\\", L"plugins\\"})
+        for (const wchar_t* pattern : {L"*.asi", L"*.ini"}) {
+            WIN32_FIND_DATAW fd{};
+            const HANDLE h = FindFirstFileW((bin + sub + pattern).c_str(), &fd);
+            if (h == INVALID_HANDLE_VALUE) continue;
+            do { if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) add(std::wstring(L"Game\\Bin\\") + sub + fd.cFileName, bin + sub + fd.cFileName); } while (FindNextFileW(h, &fd));
+            FindClose(h);
+        }
+    add(L"Apex Launcher settings.json", launcher + L"settings.json");
+    add(L"Apex Launcher log", launcher + L"ApexLauncher.log");
+    if (n > 120) text += std::format("\n    {} more not listed", n - 120);
+    LOG_INFO("[Diag] Footprint (last write against the game's start):" + text);
+    g_footprintDone = true;
+}
+
+void LogConfigKeys() {
+    const auto keys = [](const char* what, const std::wstring& path, const std::vector<std::string>& words, size_t cap) {
+        const std::string text = ReadText(path, 256 * 1024);
+        if (text.empty()) { LOG_INFO(std::format("[Diag] {} {}: not found or empty", what, M(path))); return; }
+        size_t total = 0;
+        std::string lines;
+        for (const auto& k : StartDiagLogic::ConfigKeys(text, words, cap, &total)) lines += "\n    " + M(ApexUtil::ToWide(k));
+        LOG_INFO(std::format("[Diag] {} {} time/tick/pause/GC keys ({}{}):{}", what, M(path), total, total > cap ? std::format(", {} listed", cap) : std::string(),
+                             lines.empty() ? std::string(" none") : lines));
+    };
+    // S3SS: Smooth Patch (tick and frame limits), lot streaming, GC, waits, timer, the memory monitor's modal
+    keys("S3SS", ApexPaths::S3SSConfigFile(), {"smooth", "tick", "frame", "timer", "gc", "lotstream", "wait", "memory_monitor", "pause", "time", "sleep", "throttle"}, 60);
+    keys("Apex", ApexPaths::ConfigFile(), {"pause", "tick", "limit", "gc", "time", "sleep", "wait", "deadline", "restart", "slicing", "throttle", "fps", "focus"}, 40);
+    const std::wstring bin = BinDir();
+    bool s3pp = false;
+    for (const wchar_t* sub : {L"", L"scripts\\", L"plugins\\"})
+        if (GetFileAttributesW((bin + sub + L"Sims3Performance.ini").c_str()) != INVALID_FILE_ATTRIBUTES) {
+            s3pp = true;
+            keys("Sims3Performance", bin + sub + L"Sims3Performance.ini", {}, 60); // every key: its names are its features
+        }
+    if (!s3pp) LOG_INFO("[Diag] Sims3Performance.ini: not found in Game\\Bin, scripts or plugins");
+}
+
+void LogLauncher() {
+    const std::wstring dir = LauncherDir();
+    const std::string settings = ReadText(dir + L"settings.json", 64 * 1024);
+    if (settings.empty()) LOG_INFO("[Diag] Apex Launcher settings: not found");
+    else {
+        std::string s;
+        for (const char* k : {"FixWithoutAsking", "HideWhilePlaying", "InstallUpdatesOnPlay", "PendingOptions", "IgnoredFindings"}) {
+            const std::string v = StartDiagLogic::JsonValue(settings, k);
+            s += std::format(" {}={}", k, v.empty() ? "(default)" : v);
+        }
+        LOG_INFO("[Diag] Apex Launcher settings:" + s);
+    }
+    const std::string log = ReadTail(dir + L"ApexLauncher.log", 32 * 1024);
+    std::string entries;
+    for (const auto& e : StartDiagLogic::LogEntries(log, 10)) entries += "\n    " + M(ApexUtil::ToWide(e));
+    LOG_INFO("[Diag] Apex Launcher log, last entries:" + (entries.empty() ? std::string(log.empty() ? " no log" : " none") : entries));
+}
+
+void LogProcess() {
+    wchar_t cwd[MAX_PATH] = {};
+    GetCurrentDirectoryW(MAX_PATH, cwd);
+    std::string integrity = "?", elevated = "?";
+    HANDLE token = nullptr;
+    if (OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token)) {
+        alignas(8) unsigned char buf[256];
+        DWORD n = 0;
+        if (GetTokenInformation(token, TokenIntegrityLevel, buf, sizeof buf, &n)) {
+            const PSID sid = reinterpret_cast<TOKEN_MANDATORY_LABEL*>(buf)->Label.Sid;
+            const DWORD rid = *GetSidSubAuthority(sid, *GetSidSubAuthorityCount(sid) - 1);
+            integrity = std::format("0x{:X} ({})", rid, rid >= 0x4000 ? "system" : rid >= 0x3000 ? "high" : rid >= 0x2000 ? "medium" : "low");
+        }
+        TOKEN_ELEVATION e{};
+        if (GetTokenInformation(token, TokenElevation, &e, sizeof e, &n)) elevated = e.TokenIsElevated ? "yes" : "no";
+        CloseHandle(token);
+    }
+    DWORD_PTR pm = 0, sm = 0;
+    GetProcessAffinityMask(GetCurrentProcess(), &pm, &sm);
+    BOOL inJob = FALSE;
+    IsProcessInJob(GetCurrentProcess(), nullptr, &inJob);
+    std::string job;
+    if (inJob) {
+        JOBOBJECT_EXTENDED_LIMIT_INFORMATION x{};
+        JOBOBJECT_BASIC_UI_RESTRICTIONS ui{};
+        job = QueryInformationJobObject(nullptr, JobObjectExtendedLimitInformation, &x, sizeof x, nullptr)
+                  ? std::format(", job limit flags 0x{:X}, job priority class 0x{:X}", x.BasicLimitInformation.LimitFlags, x.BasicLimitInformation.PriorityClass)
+                  : std::format(", job limits not readable (error {})", GetLastError());
+        if (QueryInformationJobObject(nullptr, JobObjectBasicUIRestrictions, &ui, sizeof ui, nullptr)) job += std::format(", job UI restrictions 0x{:X}", ui.UIRestrictionsClass);
+    }
+    STARTUPINFOW si{sizeof si};
+    GetStartupInfoW(&si);
+    // EcoQoS (power throttling), by name: GetProcessInformation(ProcessPowerThrottling = 4)
+    struct Throttle { ULONG version, control, state; } pt{1, 0, 0};
+    using GetInfo = BOOL(WINAPI*)(HANDLE, int, LPVOID, DWORD);
+    const auto get = reinterpret_cast<GetInfo>(GetProcAddress(GetModuleHandleW(L"kernel32.dll"), "GetProcessInformation"));
+    const std::string power = get && get(GetCurrentProcess(), 4, &pt, sizeof pt) ? std::format("control 0x{:X} state 0x{:X}", pt.control, pt.state) : std::string("not readable");
+    LOG_INFO(std::format("[Diag] Process: working folder {}, integrity {}, elevated {}, priority class 0x{:X}, affinity 0x{:X} of 0x{:X}, in a job {}{}, "
+                         "start flags 0x{:X} show {}, power throttling {}",
+                         M(cwd), integrity, elevated, GetPriorityClass(GetCurrentProcess()), pm, sm, inJob ? "yes" : "no", job, si.dwFlags, si.wShowWindow, power));
+    // environment: names a launcher or store sets (values only where they are no secret), with the total
+    std::string names;
+    int total = 0, shown = 0;
+    if (LPWCH env = GetEnvironmentStringsW()) {
+        for (const wchar_t* p = env; *p; p += wcslen(p) + 1) {
+            ++total;
+            const std::wstring entry = p;
+            const size_t eq = entry.find(L'=', 1);
+            if (eq == std::wstring::npos) continue;
+            const std::wstring name = entry.substr(0, eq), lower = Lower(name), value = entry.substr(eq + 1);
+            bool hit = false;
+            for (const wchar_t* pre : {L"steam", L"ea", L"origin", L"apex", L"__compat", L"sdl", L"dxvk", L"remix", L"dotnet", L"mono", L"ts3", L"sims", L"nv", L"onedrive"})
+                hit = hit || lower.rfind(pre, 0) == 0;
+            if (!hit || ++shown > 40) continue;
+            const bool plain = lower == L"__compat_layer" || lower == L"steamappid" || lower.rfind(L"apex", 0) == 0 || lower.rfind(L"dxvk", 0) == 0;
+            names += " " + M(name) + (plain ? "=" + M(value.size() > 120 ? value.substr(0, 120) : value) : std::format("({} chars)", value.size()));
+        }
+        FreeEnvironmentStringsW(env);
+    }
+    LOG_INFO(std::format("[Diag] Environment ({} variables; launcher/store/renderer names, values masked):{}{}", total, names.empty() ? std::string(" none") : names,
+                         shown > 40 ? std::format(" ... {} more not listed", shown - 40) : std::string()));
+}
+
 // ---- 7. Script errors ----
 std::set<std::wstring> g_errorsSeen;
 int g_errorLines = 0;
@@ -472,6 +690,9 @@ void CheckErrorFiles(bool first) {
         do {
             if (CompareFileTime(&fd.ftLastWriteTime, &g_processStart) < 0 || !g_errorsSeen.insert(fd.cFileName).second) continue;
             ++fresh;
+            ++g_errorCount;
+            const long long at = (Ticks(fd.ftLastWriteTime) - Ticks(g_processStart)) / 10000000;
+            if (at > g_lastErrorAt.load()) g_lastErrorAt = at;
             if (++g_errorLines > kErrorFiles) continue;
             std::string text = ReadText(docs + fd.cFileName, 8192), pick;
             for (size_t s = 0; s < text.size() && pick.empty();) {
@@ -484,7 +705,8 @@ void CheckErrorFiles(bool first) {
                 s = e + 1;
             }
             if (pick.size() > 200) pick.resize(200);
-            LOG_INFO(std::format("[Diag] New error file {} ({}): {}", M(fd.cFileName), When(fd.ftLastWriteTime), M(ApexUtil::ToWide(pick))));
+            LOG_INFO(std::format("[Diag] New error file {} ({}, +{} s from the start; pause bits now {}): {}", M(fd.cFileName), When(fd.ftLastWriteTime), at,
+                                 StartDiagLogic::PauseBits(g_bitsNow.load()), M(ApexUtil::ToWide(pick))));
         } while (FindNextFileW(h, &fd));
         FindClose(h);
     }
@@ -499,6 +721,10 @@ DWORD WINAPI BackgroundThread(LPVOID) {
     HookGuard::Try("Diag: modules", [] { LogModules(); });
     HookGuard::Try("Diag: Game\\Bin", [] { LogBin(); });
     HookGuard::Try("Diag: packs and options", [] { LogPacksAndOptions(); });
+    HookGuard::Try("Diag: footprint", [] { LogFootprint(); });
+    HookGuard::Try("Diag: process", [] { LogProcess(); });
+    HookGuard::Try("Diag: config keys", [] { LogConfigKeys(); });
+    HookGuard::Try("Diag: launcher", [] { LogLauncher(); });
     HookGuard::Try("Diag: error files", [] { std::lock_guard<std::mutex> l(g_errorLock); CheckErrorFiles(true); });
     HookGuard::Try("Diag: mods", [] { LogMods(); });
     LOG_INFO("[Diag] Background listing done");
@@ -510,7 +736,8 @@ std::atomic<HWND> g_window{nullptr};
 std::atomic<int> g_mode{-1}, g_active{-1};
 std::atomic<float> g_gameTime{0}; // GameClock +0x60, from the pump
 std::atomic<bool> g_clockKnown{false};
-struct Press { WPARAM vk; ULONGLONG at; int mode, active; float time; bool clock; };
+std::atomic<int> g_level{-1}; // GameClock +0x6C, from the pump
+struct Press { WPARAM vk; ULONGLONG at; int mode, active, level; float time; bool clock; };
 std::mutex g_keyLock;
 std::vector<Press> g_presses; // waiting for their 3 s check
 std::atomic<int> g_keyCount[6];
@@ -570,6 +797,44 @@ std::string KeyTotals() {
 
 ULONGLONG g_watchStart = 0, g_lastSample = 0, g_lastErrorCheck = 0;
 bool g_watchDone = false;
+
+// script/modal pause bit transitions and the facts of the verdict line
+constexpr int kPauseLines = 40;
+StartDiagLogic::PauseTrack g_pause;
+int g_pauseLines = 0, g_speedKeys = 0, g_keysMoved = 0, g_levelChanged = 0, g_lastDialogs = 0;
+bool g_lastInFront = false, g_verdictDone = false, g_timeSeen = false;
+float g_prevTime = 0;
+ULONGLONG g_lastTimeChange = 0;
+
+void LogVerdict(const char* prefix, ULONGLONG now, const Clock& clock, bool clockKnown) {
+    StartDiagLogic::VerdictFacts f;
+    f.clockKnown = clockKnown;
+    f.timeMoving = g_timeSeen && now - g_lastTimeChange < 5000;
+    f.bits = clock.bits;
+    f.level = clock.level;
+    f.speed = clock.speed;
+    f.now = SinceStart(now);
+    f.watchStart = SinceStart(g_watchStart);
+    f.bitHeldSinceFirst = g_pause.HeldSinceFirst();
+    if (clock.bits & 1) f.bitSince = SinceStart(g_pause.since);
+    if (g_pause.clears) f.lastClear = SinceStart(g_pause.lastClear);
+    f.sets = g_pause.sets;
+    f.clears = g_pause.clears;
+    f.otherChanges = g_pause.otherChanges;
+    f.speedKeys = g_speedKeys;
+    f.keysMoved = g_keysMoved;
+    f.levelChanged = g_levelChanged;
+    f.errorFiles = g_errorCount.load();
+    f.lastErrorFile = g_lastErrorAt.load();
+    f.inFront = g_lastInFront;
+    f.osDialogs = g_lastDialogs;
+    f.footprintRead = g_footprintDone.load();
+    {
+        std::lock_guard<std::mutex> l(g_recentLock);
+        f.recentWrites = g_recent;
+    }
+    LOG_INFO(std::string("[Diag] ") + prefix + StartDiagLogic::Verdict(f));
+}
 WorldSession::Settled g_settled;
 ChangeLog g_state(kStateLines);
 
@@ -582,18 +847,40 @@ void PumpWatch(ULONGLONG now) {
     const bool clockKnown = ReadClock(clock);
     g_clockKnown = clockKnown;
     g_gameTime = clock.time;
+    g_level = clock.level;
+    if (clockKnown) {
+        g_bitsNow = clock.bits;
+        if (!g_timeSeen || clock.time != g_prevTime) { if (g_timeSeen) g_lastTimeChange = now; g_timeSeen = true; g_prevTime = clock.time; }
+        // (from the first sample, the load included: a bit set before the world went live shows as held since then)
+        const auto ev = g_pause.Update(now, clock.bits);
+        if (ev == StartDiagLogic::PauseTrack::None && g_pause.setAtFirst && !g_pause.sets && !g_pause.clears && g_pauseLines == 0) {
+            ++g_pauseLines;
+            LOG_INFO(std::format("[Diag] Pause bit 0x1 already set at the first clock sample (+{} s from the start, during the load): bits {}", SinceStart(now), StartDiagLogic::PauseBits(clock.bits)));
+        }
+        if (ev != StartDiagLogic::PauseTrack::None && ++g_pauseLines <= kPauseLines) {
+            WindowCount c;
+            c.window = g_window.load();
+            EnumWindows(CountWindow, reinterpret_cast<LPARAM>(&c));
+            LOG_INFO(std::format("[Diag] Pause bit 0x1 {} at +{} s from the start{}: bits {}, level {}, speed {:g}, world mode {} active {}, OS windows {} (dialogs {}), error files so far {}{}",
+                                 ev == StartDiagLogic::PauseTrack::Set ? "set" : "cleared", SinceStart(now),
+                                 ev == StartDiagLogic::PauseTrack::Cleared ? std::format(" after {} ms set", now - g_pause.since) : std::string(),
+                                 StartDiagLogic::PauseBits(clock.bits), clock.level, clock.speed, mode, active, c.others, c.dialogs, g_errorCount.load(),
+                                 g_pauseLines == kPauseLines ? " (last pause bit line)" : ""));
+        }
+    }
     if (!g_watchStart) {
         // live (active) for 3 s, or edit-in-game mode 2, where time is stopped and the active byte may stay 0; mode 1 with
         // active 0 is still the load
         g_settled.Update(known && (WorldSession::Active(static_cast<unsigned char>(active), mode) || mode == 2), now);
         if (!g_settled.ready) return;
         g_watchStart = now;
-        LOG_INFO(std::format("[Diag] Pause watch: world live for 3 s (mode {}, active {}), watching 10 min; game clock {}", mode, active,
+        LOG_INFO(std::format("[Diag] Pause watch: world live for 3 s (mode {}, active {}, +{} s from the start), watching 10 min; game clock {}", mode, active, SinceStart(now),
                              clockKnown ? std::format("at 0x{:08X}", GameAddr::Get(GameAddr::Id::GameClock)) : std::string("unavailable (signature not found once)")));
         if (HANDLE t = CreateThread(nullptr, 0, SaveCheckThread, nullptr, 0, nullptr)) CloseHandle(t);
     }
     if (now - g_watchStart > kWatchMs) {
         g_watchDone = true;
+        LogVerdict("End ", now, clock, clockKnown);
         LOG_INFO("[Diag] Pause watch ended (10 min); keys " + KeyTotals());
         return;
     }
@@ -605,10 +892,16 @@ void PumpWatch(ULONGLONG now) {
             if (now - g_presses[i].at >= 3000) { due.push_back(g_presses[i]); g_presses.erase(g_presses.begin() + i); } else ++i;
     }
     for (const auto& p : due) {
+        if (p.vk != VK_SPACE && p.vk != '0') { // 1, 2, 3 and P
+            ++g_speedKeys;
+            if (p.clock && clockKnown && clock.time != p.time) ++g_keysMoved;
+            if (p.clock && clockKnown && clock.level != p.level) ++g_levelChanged;
+        }
         if (++g_keyLines > kKeyLines) continue;
         const std::string moved = p.clock && clockKnown ? std::format(", game time +{:.3f} in 3 s{}", clock.time - p.time, clock.time == p.time ? " (did not move)" : "")
                                                         : std::string(", game time unavailable");
-        LOG_INFO(std::format("[Diag] Key {} at mode {} active {}; 3 s later mode {} active {}{}{}", KeyName(p.vk), p.mode, p.active, mode, active, moved,
+        LOG_INFO(std::format("[Diag] Key {} at mode {} active {} level {}; 3 s later mode {} active {} level {}, bits {}{}{}", KeyName(p.vk), p.mode, p.active, p.level, mode, active,
+                             clock.level, clockKnown ? StartDiagLogic::PauseBits(clock.bits) : std::string("?"), moved,
                              g_keyLines == kKeyLines ? " (last key line)" : ""));
     }
     if (now - g_lastSample < 1000) return;
@@ -620,6 +913,12 @@ void PumpWatch(ULONGLONG now) {
     const HWND fg = GetForegroundWindow();
     DWORD fgPid = 0;
     if (fg) GetWindowThreadProcessId(fg, &fgPid);
+    g_lastDialogs = c.dialogs;
+    g_lastInFront = window && fg == window;
+    if (!g_verdictDone && now - g_watchStart >= 120000) {
+        g_verdictDone = true;
+        LogVerdict("", now, clock, clockKnown);
+    }
     const bool stopped = !(clock.speed > 1.2e-7f || clock.speed < -1.2e-7f);
     const std::string clockState = clockKnown ? std::format(", bits {}, level {}, speed {:g}{}", StartDiagLogic::PauseBits(clock.bits), clock.level, clock.speed, stopped ? " (stopped)" : "")
                                               : std::string(", clock unavailable");
@@ -647,12 +946,16 @@ void PumpWatch(ULONGLONG now) {
 
 void Start(const EditInGameArg::Scan& scan, const std::string& parent, const std::string& grandparent, DWORD grandparentPid) {
     g_on = GetFileAttributesW((ApexPaths::ApexDirectory() + L"diag_off.txt").c_str()) == INVALID_FILE_ATTRIBUTES;
-    if (!g_on) { LOG_INFO("[Diag] build diag-1127b: off (diag_off.txt)"); return; }
-    LOG_INFO("[Diag] build diag-1127b: start diagnostics on (read-only; a file diag_off.txt in the Apex folder turns them off)");
+    if (!g_on) { LOG_INFO("[Diag] build diag-1127c: off (diag_off.txt)"); return; }
+    LOG_INFO("[Diag] build diag-1127c: start diagnostics on (read-only; a file diag_off.txt in the Apex folder turns them off)");
     g_profile = Env(L"USERPROFILE");
     g_user = Env(L"USERNAME");
-    FILETIME a, b, c;
+    for (const wchar_t* v : {L"OneDrive", L"OneDriveCommercial", L"OneDriveConsumer"})
+        if (const auto d = Env(v); !d.empty()) g_oneDrive.push_back(d);
+    FILETIME a, b, c, nowFt;
     GetProcessTimes(GetCurrentProcess(), &g_processStart, &a, &b, &c);
+    GetSystemTimeAsFileTime(&nowFt);
+    g_tick0 = GetTickCount64() - static_cast<ULONGLONG>((Ticks(nowFt) - Ticks(g_processStart)) / 10000);
     g_cmdSave = CommandLineSave();
     RegisterDllNotification();
     HookGuard::Try("Diag: start", [&] { LogStart(scan, parent, grandparent, grandparentPid); });
@@ -679,7 +982,7 @@ void NoteWindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (wp != kKeys[i]) continue;
         ++g_keyCount[i];
         std::lock_guard<std::mutex> lock(g_keyLock);
-        if (g_presses.size() < 16) g_presses.push_back({wp, GetTickCount64(), g_mode.load(), g_active.load(), g_gameTime.load(), g_clockKnown.load()});
+        if (g_presses.size() < 16) g_presses.push_back({wp, GetTickCount64(), g_mode.load(), g_active.load(), g_level.load(), g_gameTime.load(), g_clockKnown.load()});
     }
 }
 

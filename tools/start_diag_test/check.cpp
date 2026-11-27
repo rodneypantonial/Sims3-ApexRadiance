@@ -103,6 +103,81 @@ int main() {
     for (unsigned long long t = 0; t <= 40000; t += 1000) warn |= notLive.Update(t, 5.0f, 1, 1, false);
     Expect(warn == 0, "no bit warning outside a loaded world");
 
+    const std::vector<std::wstring> od{LR"(E:\Profiles\Tester.Nine\OneDrive - Example Org\)"};
+    Expect(Mask(LR"(e:\profiles\tester.nine\onedrive - example org\Documents\x)", od, prof, user) == LR"(%OneDrive%\Documents\x)", "OneDrive folder masked before the profile");
+    Expect(Mask(L"E:/Profiles/Tester.Nine/OneDrive - Example Org/a", od, prof, user) == L"%OneDrive%/a", "OneDrive with forward slashes");
+    Expect(Mask(LR"(E:\Profiles\Tester.Nine\Documents)", od, prof, user) == LR"(%USERPROFILE%\Documents)", "profile still masked with OneDrive set");
+
+    // footprint: FILETIME ticks (100 ns)
+    const long long start = 134000000000000000LL, sec = 10000000LL;
+    bool recent = false;
+    Expect(Footprint(start - 12 * sec, start, recent) == "written 12 s before the start (in the 10 min before it)" && recent, "12 s before is recent");
+    Expect(Footprint(start - 600 * sec, start, recent) .find("600 s before") != std::string::npos && recent, "10 min before still recent");
+    Expect(Footprint(start - 601 * sec, start, recent) == "written 10 min before the start" && !recent, "just over 10 min is not recent");
+    Expect(Footprint(start - 7200 * sec, start, recent) == "written 2 h before the start" && !recent, "hours");
+    Expect(Footprint(start - 3 * 86400 * sec, start, recent) == "written 3 days before the start", "days");
+    Expect(Footprint(start + 40 * sec, start, recent) == "written 40 s after the start" && !recent, "after the start is not recent");
+
+    const std::string toml = "[meta]\nversion = 1\n[patches.SmoothPatchPrecise]\nenabled = true\ntickRateLimit = 480.0 # ticks\n"
+                             "[patches.Mimalloc]\nenabled = true\n[qol.memory_monitor]\nwarning_style = \"modal\"\n";
+    size_t total = 0;
+    auto k = ConfigKeys(toml, {"smooth", "memory_monitor"}, 10, &total);
+    Expect(total == 3 && k.size() == 3 && k[0] == "patches.SmoothPatchPrecise.enabled = true" && k[2] == "qol.memory_monitor.warning_style = \"modal\"", "config keys by section word");
+    k = ConfigKeys(toml, {"TICK"}, 10, &total);
+    Expect(k.size() == 1 && k[0] == "patches.SmoothPatchPrecise.tickRateLimit = 480.0 # ticks", "config keys by key word, any case");
+    k = ConfigKeys("; c\n[Patches]\nShortWaitSpin=1\nThreadStackDiet = 0\n", {}, 1, &total);
+    Expect(total == 2 && k.size() == 1 && k[0] == "Patches.ShortWaitSpin = 1", "every key, capped");
+
+    const std::string json = R"({"FixWithoutAsking":true,"HideWhilePlaying":false,"PendingOptions":{},"IgnoredFindings":["a"],"Theme":"amethyst"})";
+    Expect(JsonValue(json, "FixWithoutAsking") == "true" && JsonValue(json, "HideWhilePlaying") == "false", "json booleans");
+    Expect(JsonValue(json, "PendingOptions") == "{}" && JsonValue(json, "IgnoredFindings") == "[...]", "json object and list");
+    Expect(JsonValue(json, "Theme") == "\"amethyst\"" && JsonValue(json, "Missing").empty(), "json string and missing key");
+
+    const std::string launcherLog = "2026-11-27T10:00:00 Launcher 2.3.6 EA 1.69\r\nSystem.IO.IOException: in use\r\n   at X\r\n"
+                            "2026-11-27T10:05:00 Launcher 2.3.6 EA 1.69\r\nboom\r\n2026-11-27T10:06:00 Launcher 2.3.6 x\r\n";
+    auto e = LogEntries(launcherLog, 2);
+    Expect(e.size() == 2 && e[0] == "2026-11-27T10:05:00 Launcher 2.3.6 EA 1.69 | boom" && e[1] == "2026-11-27T10:06:00 Launcher 2.3.6 x", "launcher log: last entries with their first line");
+    Expect(LogEntries("not a log\n", 5).empty(), "launcher log: no header, no entry");
+
+    PauseTrack pt;
+    pt.Update(0, 1);
+    pt.Update(10, 1);
+    Expect(pt.HeldSinceFirst() && pt.sets == 0, "bit set at the first sample, held");
+    Expect(pt.Update(500, 0) == PauseTrack::Cleared && pt.clears == 1 && pt.lastClear == 500 && !pt.HeldSinceFirst(), "cleared");
+    Expect(pt.Update(700, 5) == PauseTrack::Set && pt.sets == 1 && pt.since == 700 && pt.otherChanges == 1, "set again with another bit");
+    Expect(pt.Update(800, 1) == PauseTrack::None && pt.otherChanges == 2, "other bit alone is no bit 0x1 event");
+
+    VerdictFacts f;
+    f.clockKnown = true; f.bits = 1; f.level = 1; f.speed = 0; f.now = 180; f.watchStart = 60; f.bitHeldSinceFirst = true;
+    f.speedKeys = 4; f.errorFiles = 1; f.lastErrorFile = 45; f.inFront = true; f.footprintRead = true; f.recentWrites = {"S3SS.toml (12 s before)"};
+    std::string v = Verdict(f);
+    Expect(v.rfind("Verdict: paused by bits 0x1 (script/modal), bit 0x1 held since the first sample (during the load)", 0) == 0, "verdict: held since load");
+    Expect(v.find("4 speed/pause keys, game time moved after 0") != std::string::npos && v.find("1 error files since the start, last at +45 s") != std::string::npos, "verdict: keys and errors");
+    Expect(v.find("written in the 10 min before the start: S3SS.toml (12 s before)") != std::string::npos && v.find("(at +180 s, watch from +60 s)") != std::string::npos, "verdict: writes and times");
+    VerdictFacts g;
+    g.clockKnown = true; g.timeMoving = true; g.level = 2; g.speed = 3; g.sets = 1; g.clears = 1; g.lastClear = 70; g.footprintRead = true;
+    v = Verdict(g);
+    Expect(v.rfind("Verdict: game time moving (level 2, speed 3)", 0) == 0 && v.find("bit 0x1 last cleared at +70 s") != std::string::npos, "verdict: running");
+    Expect(v.find("no speed or pause key pressed") != std::string::npos && v.find("no checked file written") != std::string::npos, "verdict: nothing pressed or written");
+    VerdictFacts h;
+    h.clockKnown = true; h.level = 0;
+    Expect(Verdict(h).find("paused by the speed level 0 (no pause bit)") != std::string::npos && Verdict(h).find("file footprint not read yet") != std::string::npos, "verdict: UI pause");
+    Expect(Verdict(VerdictFacts{}).rfind("Verdict: game clock unavailable", 0) == 0, "verdict: no clock");
+
+    {
+        const std::string a = "x -editInGameMode:true -apexDirect editInGameMode:true -editInGameMode=0 -EDITINGAMEMODE:1";
+        ArgCopies c;
+        CountArg(reinterpret_cast<const uint8_t*>(a.data()), a.size(), "editInGameMode", c);
+        Expect(c.ascii == 2 && c.asciiOn == 1 && c.wide == 0, "switch copies: ASCII, dash and separator needed, exact case");
+        const std::wstring wl = L"\"TS3W.exe\" -apexNoEditMode:true -editInGameMode:1 -editInGameMode";
+        std::vector<uint8_t> wb(wl.size() * 2);
+        for (size_t i = 0; i < wl.size(); ++i) { wb[2 * i] = static_cast<uint8_t>(wl[i]); wb[2 * i + 1] = 0; }
+        ArgCopies d, r;
+        CountArg(wb.data(), wb.size(), "editInGameMode", d);
+        CountArg(wb.data(), wb.size(), "apexNoEditMode", r);
+        Expect(d.wide == 1 && d.wideOn == 1 && d.ascii == 0 && r.wide == 1 && r.wideOn == 1, "switch copies: UTF-16, the end of the buffer");
+    }
+
     std::printf(g_fail ? "%d checks FAILED\n" : "all start diagnostics checks passed\n", g_fail);
     return g_fail ? 1 : 0;
 }
