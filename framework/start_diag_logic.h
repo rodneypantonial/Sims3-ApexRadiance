@@ -2,6 +2,7 @@
 // Pure parts of the start diagnostics (start_diag.cpp): path masking, the DBPF index check for script resources and the
 // change-only line logger. No Windows calls, so tools/start_diag_test checks them offline.
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <cwctype>
 #include <string>
@@ -90,6 +91,46 @@ struct ChangeLog {
         last = state;
         lastAt = now;
         return ++lines > cap ? CapReached : k;
+    }
+};
+
+// The game clock's pause bits (GameClock +0x40) with their meaning; the UI pause button sets none (speed and level 0)
+inline std::string PauseBits(uint32_t bits) {
+    std::string names;
+    const auto add = [&](const char* n) { names += names.empty() ? n : std::string(", ") + n; };
+    if (bits & 1) add("script/modal");
+    if (bits & 2) add("minimized");
+    if (bits & 4) add("device lost/not in front");
+    if (bits & ~7u) add("other");
+    char hex[16];
+    std::snprintf(hex, sizeof hex, "0x%X", bits);
+    return names.empty() ? hex : std::string(hex) + " (" + names + ")";
+}
+
+// Warnings of the pause watch, from one clock sample a second:
+//  ClockStuck  the game time (+0x60) has not moved for 20 s while no pause bit is set and the speed level is above 0;
+//  BitsHeld    pause bits stayed set for 20 s in a loaded world (once per bit set, again after they cleared).
+struct ClockWatch {
+    enum : int { None = 0, ClockStuck = 1, BitsHeld = 2 };
+    static constexpr unsigned long long kMs = 20000;
+    float lastTime = 0;
+    unsigned long long since = 0, bitsSince = 0;
+    bool started = false, stuckWarned = false, wasRunning = false, bitsOn = false;
+    uint32_t bitsWarned = 0;
+    int Update(unsigned long long now, float time, uint32_t bits, int level, bool live) {
+        int out = None;
+        const bool shouldRun = bits == 0 && level > 0;
+        if (!started || time != lastTime || !shouldRun || !wasRunning) { since = now; stuckWarned = false; }
+        started = true;
+        wasRunning = shouldRun;
+        lastTime = time;
+        if (shouldRun && !stuckWarned && now - since >= kMs) { stuckWarned = true; out |= ClockStuck; }
+        if (!bits || !live) { bitsOn = false; bitsWarned = 0; }
+        else {
+            if (!bitsOn) { bitsOn = true; bitsSince = now; }
+            if (bits != bitsWarned && now - bitsSince >= kMs) { bitsWarned = bits; out |= BitsHeld; }
+        }
+        return out;
     }
 };
 

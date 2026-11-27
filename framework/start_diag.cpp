@@ -508,7 +508,9 @@ DWORD WINAPI BackgroundThread(LPVOID) {
 // ---- 6. Pause watch ----
 std::atomic<HWND> g_window{nullptr};
 std::atomic<int> g_mode{-1}, g_active{-1};
-struct Press { WPARAM vk; ULONGLONG at; int mode, active; };
+std::atomic<float> g_gameTime{0}; // GameClock +0x60, from the pump
+std::atomic<bool> g_clockKnown{false};
+struct Press { WPARAM vk; ULONGLONG at; int mode, active; float time; bool clock; };
 std::mutex g_keyLock;
 std::vector<Press> g_presses; // waiting for their 3 s check
 std::atomic<int> g_keyCount[6];
@@ -526,6 +528,24 @@ bool ReadWorld(int& mode, int& active) {
         return true;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
 }
+
+// The game clock (GameAddr::GameClock, the object itself): +0x40 pause bits, +0x5C advance count (also at the UI
+// pause), +0x60 game time (moves only with no bit set and a speed above 0), +0x64 game dt, +0x68 speed, +0x6C UI level 0-3
+struct Clock { uint32_t bits = 0, advances = 0; float time = 0, dt = 0, speed = 0; int level = -1; };
+bool ReadClock(Clock& c) {
+    const uintptr_t clock = GameAddr::Get(GameAddr::Id::GameClock);
+    if (!clock) return false;
+    __try {
+        c.bits = *reinterpret_cast<const uint32_t*>(clock + 0x40);
+        c.advances = *reinterpret_cast<const uint32_t*>(clock + 0x5C);
+        c.time = *reinterpret_cast<const float*>(clock + 0x60);
+        c.dt = *reinterpret_cast<const float*>(clock + 0x64);
+        c.speed = *reinterpret_cast<const float*>(clock + 0x68);
+        c.level = *reinterpret_cast<const int*>(clock + 0x6C);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+StartDiagLogic::ClockWatch g_clockWatch;
 
 struct WindowCount { int others = 0, dialogs = 0; HWND window = nullptr; };
 BOOL CALLBACK CountWindow(HWND h, LPARAM lp) {
@@ -558,14 +578,18 @@ void PumpWatch(ULONGLONG now) {
     const bool known = ReadWorld(mode, active);
     g_mode = mode;
     g_active = active;
+    Clock clock;
+    const bool clockKnown = ReadClock(clock);
+    g_clockKnown = clockKnown;
+    g_gameTime = clock.time;
     if (!g_watchStart) {
         // live (active) for 3 s, or edit-in-game mode 2, where time is stopped and the active byte may stay 0; mode 1 with
         // active 0 is still the load
         g_settled.Update(known && (WorldSession::Active(static_cast<unsigned char>(active), mode) || mode == 2), now);
         if (!g_settled.ready) return;
         g_watchStart = now;
-        LOG_INFO(std::format("[Diag] Pause watch: world live for 3 s (mode {}, active {}), watching 10 min; game speed, pause state and sim clock: "
-                             "unavailable (no address verified for this game build)", mode, active));
+        LOG_INFO(std::format("[Diag] Pause watch: world live for 3 s (mode {}, active {}), watching 10 min; game clock {}", mode, active,
+                             clockKnown ? std::format("at 0x{:08X}", GameAddr::Get(GameAddr::Id::GameClock)) : std::string("unavailable (signature not found once)")));
         if (HANDLE t = CreateThread(nullptr, 0, SaveCheckThread, nullptr, 0, nullptr)) CloseHandle(t);
     }
     if (now - g_watchStart > kWatchMs) {
@@ -582,7 +606,9 @@ void PumpWatch(ULONGLONG now) {
     }
     for (const auto& p : due) {
         if (++g_keyLines > kKeyLines) continue;
-        LOG_INFO(std::format("[Diag] Key {} at mode {} active {}; 3 s later mode {} active {}{}", KeyName(p.vk), p.mode, p.active, mode, active,
+        const std::string moved = p.clock && clockKnown ? std::format(", game time +{:.3f} in 3 s{}", clock.time - p.time, clock.time == p.time ? " (did not move)" : "")
+                                                        : std::string(", game time unavailable");
+        LOG_INFO(std::format("[Diag] Key {} at mode {} active {}; 3 s later mode {} active {}{}{}", KeyName(p.vk), p.mode, p.active, mode, active, moved,
                              g_keyLines == kKeyLines ? " (last key line)" : ""));
     }
     if (now - g_lastSample < 1000) return;
@@ -594,12 +620,24 @@ void PumpWatch(ULONGLONG now) {
     const HWND fg = GetForegroundWindow();
     DWORD fgPid = 0;
     if (fg) GetWindowThreadProcessId(fg, &fgPid);
-    const std::string state = std::format("mode {} active {}, game window {}{}, OS windows of the game process {} (OS dialogs {}; in-game dialogs not counted)", known ? mode : -9, active,
+    const bool stopped = !(clock.speed > 1.2e-7f || clock.speed < -1.2e-7f);
+    const std::string clockState = clockKnown ? std::format(", bits {}, level {}, speed {:g}{}", StartDiagLogic::PauseBits(clock.bits), clock.level, clock.speed, stopped ? " (stopped)" : "")
+                                              : std::string(", clock unavailable");
+    // (the change key leaves out the times, which move every second while the game runs)
+    const std::string state = std::format("mode {} active {}, game window {}{}, OS windows of the game process {} (OS dialogs {}; in-game dialogs not counted){}", known ? mode : -9, active,
                                           !window ? "not seen yet" : fg == window ? "in front" : fgPid == GetCurrentProcessId() ? "behind its own window" : "not in front",
-                                          window && IsIconic(window) ? ", minimized" : "", c.others, c.dialogs);
+                                          window && IsIconic(window) ? ", minimized" : "", c.others, c.dialogs, clockState);
+    const std::string times = clockKnown ? std::format("; time +0x60 {:.3f}, dt {:g}, +0x5C {}", clock.time, clock.dt, clock.advances) : std::string();
+    if (clockKnown) {
+        const int warn = g_clockWatch.Update(now, clock.time, clock.bits, clock.level, true);
+        if (warn & StartDiagLogic::ClockWatch::ClockStuck)
+            LOG_WARNING(std::format("[Diag] Clock stuck while unpaused: game time +0x60 has not moved for 20 s with no pause bit, level {}, speed {:g}", clock.level, clock.speed));
+        if (warn & StartDiagLogic::ClockWatch::BitsHeld)
+            LOG_WARNING("[Diag] Pause bits held for 20 s in the loaded world: " + StartDiagLogic::PauseBits(clock.bits));
+    }
     switch (g_state.Next(state, now, kHeartbeatMs)) {
-    case ChangeLog::Change: LOG_INFO(std::format("[Diag] +{} s: {}", (now - g_watchStart) / 1000, state)); break;
-    case ChangeLog::Heartbeat: LOG_INFO(std::format("[Diag] +{} s (same): {}; keys {}", (now - g_watchStart) / 1000, state, KeyTotals())); break;
+    case ChangeLog::Change: LOG_INFO(std::format("[Diag] +{} s: {}{}", (now - g_watchStart) / 1000, state, times)); break;
+    case ChangeLog::Heartbeat: LOG_INFO(std::format("[Diag] +{} s (same): {}{}; keys {}", (now - g_watchStart) / 1000, state, times, KeyTotals())); break;
     case ChangeLog::CapReached: LOG_INFO("[Diag] Pause watch: line cap reached, only the end line follows"); break;
     default: break;
     }
@@ -609,8 +647,8 @@ void PumpWatch(ULONGLONG now) {
 
 void Start(const EditInGameArg::Scan& scan, const std::string& parent, const std::string& grandparent, DWORD grandparentPid) {
     g_on = GetFileAttributesW((ApexPaths::ApexDirectory() + L"diag_off.txt").c_str()) == INVALID_FILE_ATTRIBUTES;
-    if (!g_on) { LOG_INFO("[Diag] build diag-1127: off (diag_off.txt)"); return; }
-    LOG_INFO("[Diag] build diag-1127: start diagnostics on (read-only; a file diag_off.txt in the Apex folder turns them off)");
+    if (!g_on) { LOG_INFO("[Diag] build diag-1127b: off (diag_off.txt)"); return; }
+    LOG_INFO("[Diag] build diag-1127b: start diagnostics on (read-only; a file diag_off.txt in the Apex folder turns them off)");
     g_profile = Env(L"USERPROFILE");
     g_user = Env(L"USERNAME");
     FILETIME a, b, c;
@@ -641,7 +679,7 @@ void NoteWindowMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         if (wp != kKeys[i]) continue;
         ++g_keyCount[i];
         std::lock_guard<std::mutex> lock(g_keyLock);
-        if (g_presses.size() < 16) g_presses.push_back({wp, GetTickCount64(), g_mode.load(), g_active.load()});
+        if (g_presses.size() < 16) g_presses.push_back({wp, GetTickCount64(), g_mode.load(), g_active.load(), g_gameTime.load(), g_clockKnown.load()});
     }
 }
 

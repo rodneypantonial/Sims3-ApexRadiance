@@ -387,6 +387,8 @@ enum class Id : uint16_t {
     StblClear,          // FUN_0059af00 thiscall(service): releases every table and node of the list
     StblAdd,            // FUN_0059b190 thiscall(service; ResourceKey*), ret 4: loads one table into its node (adds the node first)
     StblRebuild,        // FUN_0059bde0 thiscall(service): the list from every database's STBL keys (start, locale change)
+    // ---- Game clock (framework/start_diag.cpp, read only) ----
+    GameClock,          // 0x011CDD48 (EA app 1.69.47: 0x01227DC8): the clock object itself (mov ecx,imm32 in the script pause calls)
     Count
 };
 

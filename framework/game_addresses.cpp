@@ -394,6 +394,7 @@ constexpr Info kInfo[] = {
     {"StblClear", 0x0059AF00},
     {"StblAdd", 0x0059B190},
     {"StblRebuild", 0x0059BDE0},
+    {"GameClock", 0x011CDD48},
 };
 static_assert(std::size(kInfo) == static_cast<size_t>(Id::Count), "kInfo must list every Id in order");
 
@@ -820,6 +821,9 @@ const Entry kTable[] = {
     {Id::StblClear, K::Sig, W::Text, None, 0, {{"56 8B 71 48 57 8D 79 48 3B F7 74 ?? 8D 64 24 00 8B 4E 18 85 C9 74 ?? 8B 01 8B 50 04 FF D2 C7 46 18 00 00 00 00 8B 36 3B F7", 0, M::At}, NOSIG}},
     {Id::StblAdd, K::Sig, W::Text, None, 0, {{"83 EC 30 53 55 56 57 8B D9 E8 ?? ?? ?? ?? 33 ED 3B C5 0F 84 ?? ?? ?? ?? 8B 7C 24 44", 0, M::At}, NOSIG}},
     {Id::StblRebuild, K::Sig, W::Text, None, 0, {{"83 EC 34 55 57 8B E9 E8 ?? ?? ?? ?? E8 ?? ?? ?? ?? 33 FF 3B C7 75 08 5F 32 C0 5D 83 C4 34 C3", 0, M::At}, NOSIG}},
+    // ---- Game clock: the script calls Pause / Unpause / IsPaused, each "push 1; mov ecx,clock; call" or "mov ecx,clock; jmp";
+    //      one match in Steam 1.67.2 and EA app 1.69.47 ----
+    {Id::GameClock, K::Sig, W::Image, None, 0, {{"6A 01 B9 ?? ?? ?? ?? E8 ?? ?? ?? ?? C3 CC CC CC 6A 01 B9 ?? ?? ?? ?? E8 ?? ?? ?? ?? C3 CC CC CC B9 ?? ?? ?? ?? E9", 3, M::Dword}, NOSIG}},
 };
 // clang-format on
 #undef NOSIG

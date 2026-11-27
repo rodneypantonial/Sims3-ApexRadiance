@@ -72,6 +72,37 @@ int main() {
     Expect(log.Next("c", 33000, 30000) == ChangeLog::CapReached, "cap note once");
     Expect(log.Next("d", 34000, 30000) == ChangeLog::None && log.Next("e", 99000, 30000) == ChangeLog::None, "silent after the cap");
 
+    Expect(PauseBits(0) == "0x0", "no pause bit");
+    Expect(PauseBits(1) == "0x1 (script/modal)", "bit 1 named");
+    Expect(PauseBits(6) == "0x6 (minimized, device lost/not in front)", "bits 2 and 4 named");
+    Expect(PauseBits(0x11) == "0x11 (script/modal, other)", "unknown bit marked");
+
+    ClockWatch w;
+    int warn = 0;
+    for (unsigned long long t = 0; t <= 19000; t += 1000) warn |= w.Update(t, 5.0f, 0, 1, true);
+    Expect(warn == 0, "no warning before 20 s");
+    Expect(w.Update(20000, 5.0f, 0, 1, true) == ClockWatch::ClockStuck, "clock stuck after 20 s unpaused");
+    Expect(w.Update(25000, 5.0f, 0, 1, true) == 0, "stuck warned once");
+    w.Update(26000, 6.0f, 0, 1, true);
+    Expect(w.Update(45000, 6.0f, 0, 1, true) == 0 && w.Update(46000, 6.0f, 0, 1, true) == ClockWatch::ClockStuck, "warns again after the clock moved");
+    ClockWatch ui;
+    warn = 0;
+    for (unsigned long long t = 0; t <= 60000; t += 1000) warn |= ui.Update(t, 5.0f, 0, 0, true);
+    Expect(warn == 0, "the UI pause (level 0) is no stuck clock");
+    warn = 0;
+    for (unsigned long long t = 61000; t <= 80000; t += 1000) warn |= ui.Update(t, 5.0f, 0, 2, true);
+    Expect(warn == 0, "20 s counted from the unpause");
+    ClockWatch bits;
+    warn = 0;
+    for (unsigned long long t = 0; t <= 19000; t += 1000) warn |= bits.Update(t, 5.0f, 1, 1, true);
+    Expect(warn == 0 && bits.Update(20000, 5.0f, 1, 1, true) == ClockWatch::BitsHeld, "bit 1 held 20 s warned");
+    Expect(bits.Update(21000, 5.0f, 1, 1, true) == 0, "held bits warned once");
+    Expect(bits.Update(22000, 5.0f, 3, 1, true) == ClockWatch::BitsHeld, "another bit set warned");
+    ClockWatch notLive;
+    warn = 0;
+    for (unsigned long long t = 0; t <= 40000; t += 1000) warn |= notLive.Update(t, 5.0f, 1, 1, false);
+    Expect(warn == 0, "no bit warning outside a loaded world");
+
     std::printf(g_fail ? "%d checks FAILED\n" : "all start diagnostics checks passed\n", g_fail);
     return g_fail ? 1 : 0;
 }
